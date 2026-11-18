@@ -1,0 +1,127 @@
+"""Potential interventions: decisions the fleet will not take on its own.
+
+A card names a choice that trades speed against budget or needs judgement, the command that takes
+it, and where one exists a dashboard operation that runs it.
+"""
+from __future__ import annotations
+
+import sqlite3
+
+from . import store, usage
+from .config import Config
+
+ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "INFO": 3}
+CHURN_ATTEMPTS = 4
+FANOUT_MIN = 3
+
+
+def card(severity: str, kind: str, title: str, what: str, action: str,
+         ops: list[dict[str, object]] | None = None) -> dict[str, object]:
+    return {"severity": severity, "kind": kind, "title": title, "what": what, "action": action, "ops": ops or []}
+
+
+def op(label: str, name: str, confirm: str = "", **args: object) -> dict[str, object]:
+    return {"label": label, "op": name, "args": args, "confirm": confirm}
+
+
+def usage_cards(cfg: Config, snap: dict[str, object], slots: dict[str, int]) -> list[dict[str, object]]:
+    cards = []
+    entries = {str(e["harness"]): e for e in snap.get("harnesses", [])}  # type: ignore[union-attr]
+    under = [h for h, e in entries.items() if e.get("pace") == "under" and not e.get("stale")]
+    for name, entry in entries.items():
+        running = slots.get(name, 0)
+        win = usage.binding(entry)
+        if not win:
+            if not running:
+                cards.append(card("INFO", "idle_harness", f"{name}: no workers running",
+                                  "This harness is configured but idle.", f"workboard up --harness {name}",
+                                  [op(f"Start {name}", "workers", harness=name, slots=cfg.harnesses[name].slots)]))
+            continue
+        reset = usage.when(win["resets_at"])
+        if entry.get("stale"):
+            cards.append(card("MEDIUM", "usage_stale", f"{name}: usage reading is {(entry.get('age_s') or 0) / 3600:.1f}h old",
+                              "Stale readings are shown but never steer claims.",
+                              f"Refresh the reading for {name} (for a CLI cache, open its usage screen)."))
+        elif entry["pace"] == "reserve":
+            cards.append(card("CRITICAL", "usage_reserve", f"{name}: {win['remaining_pct']:.0f}% left, authoring paused",
+                              f"New authoring is refused until the reset at {reset}. Reviews still run.",
+                              f"workboard down --harness {name}",
+                              [op(f"Drain {name}", "workers", f"Stop {name} after its current work?", harness=name, slots=0)]))
+        elif entry["pace"] == "over":
+            rate, hours = float(win.get("rate_pct_per_h") or 0), float(win.get("hours_to_reset") or 0)
+            sustainable = float(win["remaining_pct"]) / hours if hours > 0 else 0.0
+            keep = max(1, int(max(1, running) * sustainable / rate)) if rate > 0 and running else 1
+            gap = max(0.0, (float(win["resets_at"]) - float(win.get("exhausts_at") or win["resets_at"])) / 3600.0)
+            shift = f" Shift authoring to {', '.join(under)}, which would otherwise leave allowance unused." if under else ""
+            cards.append(card("HIGH" if gap >= 12 else "MEDIUM", "usage_over_pace",
+                              f"{name}: runs out {usage.when(win.get('exhausts_at'))}, {gap:.0f}h before the {reset} reset",
+                              f"{win['remaining_pct']:.0f}% left, burning {rate}%/h against a sustainable "
+                              f"{sustainable:.2f}%/h with {running} worker(s).{shift}",
+                              f"To last until the reset: workboard up --harness {name} --slots {keep}. "
+                              "To keep speed: do nothing and accept the dry spell.",
+                              [op(f"Run {name} at {keep} slot(s)", "workers",
+                                  "Extra workers finish their current work, then stop.", harness=name, slots=keep)]
+                              if running > keep else []))
+        elif entry["pace"] == "under":
+            unused = max(0.0, 100.0 - float(win.get("projected_pct_at_reset") or 100.0))
+            cards.append(card("MEDIUM", "usage_under_pace", f"{name}: about {unused:.0f}% will expire unused at {reset}",
+                              f"{win['remaining_pct']:.0f}% left with {running} worker(s).",
+                              f"workboard up --harness {name} --slots {running + 1}",
+                              [op(f"Run {name} at {running + 1} slot(s)", "workers", harness=name, slots=running + 1)]))
+    return cards
+
+
+def task_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    cards = []
+    rows = conn.execute("SELECT task_id, status, attempts, reason, depends_json FROM tasks").fetchall()
+    status = {r["task_id"]: r["status"] for r in rows}
+    for row in rows:
+        if row["status"] == "NEEDS_TRIAGE":
+            cards.append(card("CRITICAL", "triage", f"`{row['task_id']}` is parked after {row['attempts']} attempts",
+                              f"Last reason: {row['reason'] or 'none'}. Workers will not claim it again on their own.",
+                              f"Read its takeover notes, fix or narrow the brief, then: workboard requeue {row['task_id']}",
+                              [op("Requeue", "requeue", task=row["task_id"]), op("Cancel", "cancel", "Cancel this task?", task=row["task_id"])]))
+        elif row["status"] not in ("DONE", "CANCELLED") and row["attempts"] >= CHURN_ATTEMPTS:
+            cards.append(card("MEDIUM", "churn", f"`{row['task_id']}` is on attempt {row['attempts']}",
+                              f"Last reason: {row['reason'] or 'none'}. Repeated attempts usually mean the brief is wrong, not the workers.",
+                              f"Compare the brief with the takeover notes and narrow the slice: workboard show {row['task_id']}"))
+    fan: dict[str, int] = {}
+    for row in rows:
+        if row["status"] in ("DONE", "CANCELLED"):
+            continue
+        for dep in store.loads(row["depends_json"]):
+            fan[dep] = fan.get(dep, 0) + 1
+            if status.get(dep) == "CANCELLED":
+                cards.append(card("HIGH", "blocked_by_cancelled", f"`{row['task_id']}` depends on cancelled `{dep}`",
+                                  "It can never become ready.", f"workboard requeue {dep}   or   workboard cancel {row['task_id']}"))
+    waiting = sorted(((n, t) for t, n in fan.items() if n >= FANOUT_MIN and status.get(t) == "READY"), reverse=True)
+    if waiting:
+        top = waiting[0][1]
+        cards.append(card("MEDIUM", "critical_path", "Critical-path work is ready but unclaimed",
+                          ", ".join(f"`{t}` unblocks {n}" for n, t in waiting[:4]) + ".",
+                          f"workboard priority {top} 500", [op(f"Raise {top}", "priority", task=top, priority=500)]))
+    return cards
+
+
+def train_cards(manifest: dict[str, object]) -> list[dict[str, object]]:
+    builds = manifest.get("builds") or []
+    if not builds:
+        return []
+    nxt = builds[0]  # type: ignore[index]
+    tight = [t for t in nxt["tasks"] if t["slack_min"] < 10]
+    if not tight or nxt["minutes_to_cutoff"] > 90:
+        return []
+    return [card("MEDIUM", "build_cutoff", f"{len(tight)} slice(s) may miss the {nxt['label']} build",
+                 f"Land cutoff {nxt['cutoff']}: " + ", ".join(f"`{t['task_id']}` ({t['status']})" for t in tight[:5]) + ".",
+                 "Let them ride the following build, or review them now.")]
+
+
+def collect(cfg: Config, conn: sqlite3.Connection, snap: dict[str, object], slots: dict[str, int],
+            manifest: dict[str, object]) -> list[dict[str, object]]:
+    cards: list[dict[str, object]] = []
+    for source in (lambda: usage_cards(cfg, snap, slots), lambda: task_cards(conn), lambda: train_cards(manifest)):
+        try:
+            cards.extend(source())
+        except Exception as exc:  # one broken source must not hide the others
+            cards.append(card("INFO", "source_error", "An intervention source failed", str(exc)[:200], ""))
+    return sorted(cards, key=lambda c: ORDER.get(str(c["severity"]), 9))

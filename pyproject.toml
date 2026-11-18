@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workboard"
+version = "0.1.0"
+description = "A control tower for subscription stacking: run coding agents from several subscriptions as one delivery pipeline, with a work queue, cross-vendor review and landing on main."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Adrian McPhee"}]
+keywords = ["coding agents", "claude code", "codex", "subscription stacking", "work queue", "trunk-based development", "code review"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/adrianmcphee/workboard"
+Repository = "https://github.com/adrianmcphee/workboard"
+Issues = "https://github.com/adrianmcphee/workboard/issues"
+Changelog = "https://github.com/adrianmcphee/workboard/blob/main/CHANGELOG.md"
+
+[project.scripts]
+workboard = "workboard.cli:main"
+
+[tool.setuptools]
+packages = ["workboard"]
