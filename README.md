@@ -50,9 +50,9 @@ If you are a coding agent, read [AGENTS.md](AGENTS.md) first.
 
 ## Why it exists: subscription stacking
 
-Subscription stacking means paying for several flat-rate agent plans from different vendors and running them side by side. It sounds extravagant until you price the alternative: flat-rate subscriptions are far cheaper than paying per token for heavy use. Over one month that included a busy delivery week, one developer's agents used about 49 billion input tokens (97% of them cached) and 144 million output tokens across three tools, measured from the tools' local logs. At open-model API prices that month would have cost about $14,900. The three subscriptions cost about $600 for the same month, roughly 25 times less.
+Subscription stacking means paying for several flat-rate agent plans from different vendors and running them side by side. It sounds extravagant until you price the alternative. Over one month that included a busy delivery week, one developer's three agent tools recorded about 49 billion input tokens (97% of them cached) and 144 million output tokens in their local logs. Repriced at Together's listed GLM-5.3 API rates, that month would have cost about $14,900. The three subscriptions cost about $600 for the same month, roughly 25 times less. Repricing doesn't show that an open model would need the same tokens or give the same results, but for this workload the gap is large.
 
-The busiest week shows what a super-heavy user stacking subscriptions looks like: about 25 billion input tokens and 106,000 model calls in seven days. Kept up for a month, that pace would cost about $32,000 per token, 53 times the subscriptions and close to the price of a dedicated 8-GPU server for one person.
+The busiest week shows what a super-heavy user stacking subscriptions looks like: about 25 billion input tokens and 106,000 model calls in seven days. Kept up for a month, that pace would be about $32,000 at the same rates, 53 times the subscriptions and more than half the list price of a dedicated 8-GPU server, for one person.
 
 Each subscription caps usage, though, which is why heavy users stack several. Doing that by hand, with a dozen terminals and a spreadsheet of reset times, creates new problems. Workboard exists to solve them.
 
