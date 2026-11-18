@@ -38,6 +38,10 @@ It runs coding agents from several subscriptions on one repository as one delive
 
 *A synthetic demo: eight tasks on a made-up shop, three stand-in agents named after real CLIs, a review that fails once, a build, and one rejected slice turning into a fix task.*
 
+The same run in the web console (`workboard dashboard`): what each plan has left, the build train with the slices in flight, sign-off with accept and reject buttons, every task and the event log, refreshing live on your own machine.
+
+![The Workboard web console during the synthetic run: task counts, subscription pace with worker controls, the build train, sign-off and the task list](docs/images/dashboard.gif)
+
 Workboard is a work queue and a control room. It hands tasks to agent CLIs (Claude Code, Codex, or any other that runs unattended), has an agent from a different vendor review each result, lands approved work on your main branch, and shows one page where a human sees what is happening and makes the decisions the fleet should not make for itself.
 
 Python 3.11 or newer, standard library only, macOS and Linux. It runs on one machine today; [docs/vision.md](docs/vision.md) covers what comes next. Early software: version 0.1, interfaces may change.
@@ -346,6 +350,8 @@ The fleet never lowers total throughput on its own. When every subscription is o
 Set `[usage] policy = "advise"` to keep the display and drop the refusals.
 
 ## Interventions and the dashboard
+
+![The Workboard web console after a build: sign-off verdicts, a rejected slice turned into a fix task, and the event log](docs/images/dashboard.png)
 
 The dashboard lists **potential interventions**: decisions that need a human, each with the command that takes it and usually a button. Examples are a subscription that will run dry, a task parked for triage, a task on its fourth attempt, work blocked behind a cancelled dependency, and critical-path work nobody has claimed.
 

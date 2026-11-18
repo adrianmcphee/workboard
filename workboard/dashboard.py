@@ -75,7 +75,7 @@ PAGE = r"""<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;padding:14px 16px;border-bottom:1px solid var(--line)}
 h1{font-size:18px;margin:0}h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 10px}
-main{padding:16px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+main{padding:16px;display:grid;gap:16px;grid-template-columns:1fr}@media(min-width:900px){main{grid-template-columns:1fr 1fr}}
 section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
 section.wide{grid-column:1/-1}.muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}
 .kpis{display:flex;flex-wrap:wrap;gap:8px}.kpi{border:1px solid var(--line);border-radius:8px;padding:6px 10px;min-width:84px}.kpi b{display:block;font-size:20px}
