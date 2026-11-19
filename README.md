@@ -94,6 +94,7 @@ Every task goes through the same six stages. Each stage has one gate that decide
                   takeover: back to the queue, same worktree, notes attached
 
   main --(scheduled build)--> build record --> human sign-off --> a rejection becomes a top-priority fix task
+       --(audit of a build)--> audit jobs --> findings --> triage --> one fix task per root cause --> verified next audit
 ```
 
 | Stage | What happens | Gate to move on | Decided by |
@@ -104,6 +105,7 @@ Every task goes through the same six stages. Each stage has one gate that decide
 | **4. Land** | The branch is rebased onto main, guarded again, and pushed as a fast-forward under a short lock. Its worktree is retired. | The guards pass on the rebased commit and main has not moved. | Workboard. |
 | **5. Build** | At fixed times the head of main is built in full, and the build records which slices it contains. | The build command passes. | Workboard, on a schedule. |
 | **6. Sign-off** | A person accepts or rejects each slice in the build. | A rejection becomes the next top-priority task, with the note as its brief. | A person. |
+| **7. Audit** | Agents re-examine a build: each newly landed slice against its brief, plus your checklists. Defects become findings, findings become fix tasks, and a later audit verifies each fix. | A finding closes only when a later audit confirms the fix in a build. | Agents audit and triage; a person decides what is not worth fixing. |
 
 When an attempt ends without a result (a quota stop, a crash, a timeout, a failed review or a landing conflict), the task goes back to the queue as a takeover. The next author continues in the same worktree, with notes on what happened.
 
@@ -327,6 +329,53 @@ A rejection queues `<task>-fix1` at top priority with your note as its brief, an
 
 Every author and reviewer prompt states the build that slice is going for, the land cutoff, and what happens if it misses.
 
+## Audits: from landed work to proven fixes
+
+Review checks a branch before it lands; sign-off is one person's verdict on a build. An audit is the repeatable pass in between: several agents re-examine a built state of main, record every defect with a permanent ID, and the queue carries each defect to a fix that a later audit confirms. Run one after every few builds, and the audits form a history you can compare: how many defects each one found, how many fixes held, and how many escaped an earlier pass.
+
+```sh
+workboard audit open              # audit the latest good build (or --build <id>, or --sha <commit>)
+workboard up                      # workers claim audit jobs alongside their other work
+workboard audit status            # progress, live findings, decisions waiting on you
+workboard audit report            # numbers for this audit, and .workboard/audits/<id>/report.md
+```
+
+**Audit jobs.** Opening an audit checks out the audited commit once, read-only, and creates jobs that any harness claims under a lease, like tasks:
+
+| Job | One per | The agent |
+|---|---|---|
+| `slice` | task that landed since the last audit | checks that the build still keeps every promise in that task's brief; prefers a harness other than the author |
+| `checklist` | Markdown file in `workboard/audits/` | follows your checklist: a user journey, a UX pass, a performance budget, a release check |
+| `verify` | task with fixes waiting for confirmation | reproduces each fixed finding and records `verified` or `reopened` |
+| `triage` | audit, once the others are finished | groups findings into root causes and proposes what not to fix |
+
+A checklist file has the same shape as a task file. `resource:` makes jobs that name the same resource run one at a time (for measurements a busy machine would distort), `lease_min:` sets its time, and `quick: true` includes it in `workboard audit open --quick`, which otherwise only verifies fixes.
+
+```markdown
+---
+id: first-run
+title: A new user gets from install to a first result
+resource: quiet-machine
+---
+1. Start from a clean profile and follow the getting-started guide exactly.
+2. Time each step and note every place you had to guess.
+```
+
+**Findings.** An agent records a defect with `workboard audit file --job <job> --task <owner> --severity P0|P1|P2 --title ... --repro ... --expected ...`. It must name the task that owns the defect. With `[audit] refs_command` set, `--ref` values must also appear in that command's output for the audited commit, which lets a finding point at requirement or test IDs your project already keeps. IDs (`F-0001`) are allocated in one transaction, so any number of agents can file at once, and the same defect filed twice becomes a second sighting of one finding.
+
+**Fixes.** Triage groups findings that share a cause into a root cause (`RC-0001`) and queues exactly one fix task for it (`fix-rc-0001`). A cause never has two fixes in flight. Fix tasks are ordinary tasks: authored, reviewed by another harness and landed. P0 fixes go ahead of audit jobs, and P1 fixes ahead of ordinary work. A finding moves to `fixed` only when a landed commit carries the trailer `Fixes: F-0001` and touches a path in `[audit] regression_paths`. It moves to `verified` only when a later audit's verify job confirms it in a build; `reopened` sends it back to triage and queues the next fix (`fix-rc-0001-r2`).
+
+```
+open -> fix-scheduled -> fixed -> verified
+  |                        |
+  |                        +-> reopened -> (triage again)
+  +-> duplicate, wont-fix-proposed -> wont-fix (a person decides)
+```
+
+**What the report tracks across audits:** new findings, fixes verified and reopened, escapes (defects found in a slice an earlier audit passed), live findings by severity, fix tasks by status, and landed tasks that no audit has covered yet.
+
+An agent that edits the audit checkout has its change saved as a patch in its job's evidence folder, the checkout is restored, and the job goes to another harness. Only a person turns a proposed `wont-fix` into a decision: `workboard audit decide F-0007 --wont-fix --note "..."`.
+
 ## Subscriptions and pace
 
 Workboard reads how much of each subscription is left and when it resets:
@@ -379,6 +428,14 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 | `workboard build` | Build the head of main and record its manifest |
 | `workboard builds [id] [--latest]` | List builds or show one |
 | `workboard signoff accept\|reject <task>` | Give a verdict on a slice of a build |
+| `workboard audit open [--build id] [--sha c] [--quick]` | Open an audit of a build and create its jobs |
+| `workboard audit status` | The latest audit, live findings and decisions waiting on you |
+| `workboard audit jobs \| findings \| show <F-id>` | Inspect jobs and findings |
+| `workboard audit file \| verify \| triage` | What audit agents run (a person may run them too) |
+| `workboard audit decide <F-id> --wont-fix\|--reopen` | Decide a proposed wont-fix |
+| `workboard audit requeue <job>` | Give a parked audit job another run |
+| `workboard audit reconcile` | Mark findings fixed from landed trailers (also runs after every landing) |
+| `workboard audit report [--audit id] [--json]` | Write the audit's report and print its numbers |
 | `workboard usage [--json]` | Allowance, resets and pace per harness |
 | `workboard interventions [--json]` | Decisions waiting on a human |
 | `workboard events` | The event log |
@@ -396,6 +453,9 @@ Lowering `--slots` never kills an agent: the extra workers finish their current 
 | `.workboard/handoffs/<task>/` | Rendered prompts, takeover notes, review verdict |
 | `.workboard/logs/` | Agent, landing, build and worker output |
 | `.workboard/builds/` | Build records and sign-off verdicts |
+| `workboard/audits/*.md` | Audit checklists, committed with the project |
+| `.workboard/audits/<audit>/` | Per job: brief, prompts, evidence, result; per audit: `report.md`, `summary.json`, `findings.jsonl` |
+| `.worktrees/_audit-<audit>/` | The read-only checkout of the audited commit |
 | `.worktrees/<task>/` | One checkout per open task |
 
 `.workboard/` and `.worktrees/` are local and belong in `.gitignore`.

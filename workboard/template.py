@@ -38,6 +38,15 @@ schedule = []                 # e.g. ["12:30", "20:30"]; run `workboard build` a
 cutoff_min = 30               # a slice must be on main this long before a build to ride it
 command = ""                  # e.g. "make release-candidate"
 
+[audit]
+checklists = "workboard/audits"   # one Markdown checklist per file; each becomes a job in every audit
+per_slice = true              # also audit every task that landed since the last audit against its brief
+lease_min = 60
+prepare = ""                  # run once in the audit checkout when an audit opens, e.g. "make dev-build"
+refs_command = ""             # prints valid reference IDs, one per line, for findings' --ref
+regression_paths = ["tests/**", "test/**", "spec/**", "**/tests/**", "**/test_*", "**/*_test.*", "**/*.test.*", "**/*.spec.*"]
+trailer = "Fixes"             # a landed "Fixes: F-0001" on a commit touching a regression path marks it fixed
+
 [usage]
 policy = "enforce"            # enforce | advise | off
 reserve_pct = 3               # stop authoring on a subscription with this little left

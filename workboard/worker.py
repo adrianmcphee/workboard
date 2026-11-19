@@ -10,7 +10,7 @@ import signal
 import sqlite3
 import time
 
-from . import gitops, harness as runner, prompt, queue, store, usage
+from . import audits, gitops, harness as runner, prompt, queue, store, usage
 from .config import Config
 
 IDLE_SLEEP_S = 5.0
@@ -56,6 +56,11 @@ def land_task(cfg: Config, conn: sqlite3.Connection, task_id: str, branch: str, 
         ok, detail = False, f"landing error: {exc}"[:400]
     if ok:
         queue.landed(conn, cfg, task_id, detail, actor=worker)
+        try:
+            audits.reconcile(cfg, conn)
+        except Exception as exc:  # a landed slice stays landed; the next reconcile catches up
+            with store.write(conn):
+                store.event(conn, worker, "audit_reconcile_failed", task_id, str(exc)[:300])
         kept = gitops.retire(cfg, task_id, branch, detail)
         if kept != "retired":
             with store.write(conn):
@@ -113,9 +118,24 @@ class Worker:
                     verdict = usage.claim_verdict(snap, self.harness.name, mine, slots.get(self.harness.name, 0), set(slots))
                 except Exception:
                     verdict = None
-                claim = queue.claim(self.conn, self.cfg, self.harness.name, self.id, os.getpid(), usage_verdict=verdict)
+                # Branch reviews first, then audit jobs, then authoring. Audit claims step aside for urgent fixes.
+                claim = queue.claim(self.conn, self.cfg, self.harness.name, self.id, os.getpid(), usage_verdict=verdict,
+                                    review_only=True)
                 if not claim["claimed"]:
-                    if claim["reason"] == "board_complete" or self.once:
+                    job = audits.claim(self.conn, self.cfg, self.harness.name, self.id, os.getpid(), usage_verdict=verdict)
+                    if job["claimed"]:
+                        try:
+                            self.audit(job)
+                        except Exception as exc:
+                            audits.finish(self.conn, self.cfg, str(job["job_id"]), str(job["token"]), ok=False,
+                                          reason=f"worker error: {exc}"[:400])
+                        if self.once:
+                            land_pending(self.cfg, self.conn, self.id)
+                            break
+                        continue
+                    claim = queue.claim(self.conn, self.cfg, self.harness.name, self.id, os.getpid(), usage_verdict=verdict)
+                if not claim["claimed"]:
+                    if (claim["reason"] == "board_complete" and not audits.has_work(self.conn)) or self.once:
                         break
                     self._sleep(IDLE_SLEEP_S)
                     continue
@@ -203,3 +223,55 @@ class Worker:
         note_takeover(self.cfg, task_id, self.harness.name, "Review rejected the branch",
                       "Fix each defect, or show with evidence why it is not one:\n" + "\n".join(f"- {d}" for d in defects), worktree)
         queue.finish_review(self.conn, self.cfg, task_id, token, "fail", "; ".join(defects))
+
+    def audit(self, job: dict[str, object]) -> None:
+        """Run one audit job against the shared audit checkout and judge it by its result file."""
+        job_id, token = str(job["job_id"]), str(job["token"])
+        worktree, evidence = Path(str(job["worktree"])), Path(str(job["evidence"]))
+        result = audits.result_path(evidence)
+        result.unlink(missing_ok=True)
+        log = log_path(self.cfg, job_id, self.harness.name, "audit")
+        prompt_file = evidence / f"prompt-{self.harness.name}.md"
+        prompt_file.write_text(prompt.render_audit(self.cfg, job, self.harness.name), encoding="utf-8")
+        code = runner.run(
+            self.harness, worktree, prompt_file, log,
+            beat=lambda: audits.heartbeat(self.conn, self.cfg, job_id, token),
+            beat_every_s=self.cfg.heartbeat_s, deadline=time.time() + int(job["lease_min"]) * 60.0,  # type: ignore[arg-type]
+            should_stop=lambda: self.stop, extra_env={"WORKBOARD_ROOT": str(self.cfg.root)})
+        quota = code != 0 and runner.quota_hit(self.harness, log)
+        changed = restore_audit_checkout(worktree, str(job["sha"]), evidence)
+        try:
+            data = json.loads(result.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        problem = ""
+        if code == runner.STOPPED:
+            problem = "the lease ended or the worker was stopped before the agent finished"
+        elif code != 0:
+            problem = f"the agent exited with status {code}" + (" after hitting its usage limit" if quota else "")
+        elif changed:
+            problem = f"the agent changed the audit checkout; the change was saved to {changed} and undone"
+        elif not isinstance(data, dict) or data.get("complete") is not True:
+            problem = str((data or {}).get("reason") or (data or {}).get("summary") or "no complete result file")
+        audits.finish(self.conn, self.cfg, job_id, token, ok=not problem, reason=problem, quota=quota)
+
+
+def restore_audit_checkout(worktree: Path, sha: str, evidence: Path) -> str:
+    """Put the shared audit checkout back at its commit, saving any change an agent made as a patch first."""
+    status = gitops.dirty(worktree)
+    moved = gitops.head(worktree) != sha
+    if not status and not moved:
+        return ""
+    patch = evidence / f"checkout-changes-{datetime.now().strftime('%Y%m%d-%H%M%S')}.patch"
+    parts = ["# git status", status, "# uncommitted changes", gitops.git(worktree, "diff", "HEAD").stdout]
+    if moved:
+        parts += ["# commits made on top of the audited commit", gitops.git(worktree, "log", "-p", f"{sha}..HEAD").stdout]
+    for line in status.splitlines():
+        if line.startswith("?? "):
+            name = worktree / line[3:].strip()
+            if name.is_file() and name.stat().st_size < 1_000_000:
+                parts += [f"# untracked file {line[3:].strip()}", name.read_text(encoding="utf-8", errors="replace")]
+    patch.write_text("\n".join(parts), encoding="utf-8")
+    gitops.out(worktree, "reset", "--hard", sha)
+    gitops.out(worktree, "clean", "-fd")
+    return str(patch)

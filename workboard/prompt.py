@@ -107,3 +107,34 @@ def render(cfg: Config, claim: dict[str, object], harness: str, worktree: Path,
         if rules.is_file():
             parts += [f"## Project rules: `{rules.name}`", "", rules.read_text(encoding="utf-8").strip(), ""]
     return "\n".join(parts).rstrip() + "\n"
+
+
+def render_audit(cfg: Config, job: dict[str, object], harness: str) -> str:
+    """The text an audit agent receives: its job, how to report, and the project rules."""
+    from . import audits
+    job_id, evidence = str(job["job_id"]), Path(str(job["evidence"]))
+    lease = int(job["lease_min"])  # type: ignore[arg-type]
+    wb = audits.cli_prefix(cfg)
+    result = audits.result_path(evidence)
+    parts = [f"<!-- workboard role=audit task={job_id} handoff={evidence} verdict={result} root={cfg.root} kind={job['kind']} -->",
+             f"# Audit job `{job_id}`: {job['title']}", "", Path(str(job["brief_path"])).read_text(encoding="utf-8").strip(), "",
+             "## Audit assignment", f"""You are auditing commit `{job['sha']}`, checked out in `{job['worktree']}`. You have **{lease} minutes**.
+- The checkout is read-only for you: do not modify, commit or stash anything in it. Any change is saved as a patch and undone.
+- Keep screenshots, logs, measurements and notes in `{evidence}`. Never fix what you find; findings become fix tasks.
+- Record each defect as soon as you find it, naming the task that owns it:
+  `{wb} audit file --job {job_id} --task <task id> --severity P0|P1|P2 --title "..." --repro "..." --expected "..." [--step <checklist step>] [--ref <id>]... [--reference "how comparable software behaves"] [--evidence <file>]...`
+  P0 blocks core work or loses work; P1 is serious friction, a wrong result or a broken budget; P2 is polish.
+  Filing a defect someone already filed adds a sighting to it, which is correct.
+- See what is filed: `{wb} audit findings` (add `--untriaged` or `--json`).""" ]
+    if job["kind"] == "verify":
+        parts.append(f"- Record one verdict per finding: `{wb} audit verify --job {job_id} F-0000 --result verified|reopened --note \"...\" [--evidence <file>]...`")
+    if job["kind"] == "triage":
+        parts.append(f"""- Group a cause and queue its one fix task: `{wb} audit triage --job {job_id} --group F-0001,F-0002 --title "the root cause" [--severity P1] [--task <owner>]`
+- Attach to a known cause: `{wb} audit triage --job {job_id} --group F-0003 --root-cause RC-0001`
+- Duplicate or propose wont-fix: `{wb} audit triage --job {job_id} --duplicate F-0004 --note "of F-0001"`, `{wb} audit triage --job {job_id} --propose-wont-fix F-0005 --note "why"`""")
+    parts.append(f"""- Finish by writing `{result}` as `{{"complete": true, "summary": "...", "checks": {{"<item>": "pass|fail|not-run"}}}}`.
+  If you could not finish, write `"complete": false` with the reason; the job goes to another agent with your evidence.""")
+    for rules in cfg.rules:
+        if rules.is_file():
+            parts += ["", f"## Project rules: `{rules.name}`", "", rules.read_text(encoding="utf-8").strip()]
+    return "\n".join(parts).rstrip() + "\n"

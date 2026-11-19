@@ -70,6 +70,89 @@ CREATE TABLE IF NOT EXISTS workers (
   started_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audits (
+  audit_id TEXT PRIMARY KEY,
+  sha TEXT NOT NULL UNIQUE,
+  build_id TEXT,
+  quick INTEGER NOT NULL DEFAULT 0,
+  worktree TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  opened_at REAL NOT NULL,
+  closed_at REAL
+);
+CREATE TABLE IF NOT EXISTS audit_jobs (
+  job_id TEXT PRIMARY KEY,
+  audit_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  title TEXT NOT NULL,
+  brief_path TEXT NOT NULL,
+  evidence_dir TEXT NOT NULL,
+  resource TEXT,
+  avoid_harness TEXT,
+  status TEXT NOT NULL,
+  lease_min INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_owner TEXT,
+  lease_harness TEXT,
+  lease_token TEXT,
+  lease_pid INTEGER,
+  claimed_at REAL,
+  heartbeat_expires_at REAL,
+  deadline_at REAL,
+  finished_by TEXT,
+  finished_at REAL,
+  reason TEXT,
+  updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS findings (
+  finding_id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL UNIQUE,
+  fingerprint TEXT NOT NULL,
+  audit_id TEXT NOT NULL,
+  job_id TEXT,
+  task_id TEXT NOT NULL,
+  refs_json TEXT NOT NULL DEFAULT '[]',
+  step TEXT,
+  severity TEXT NOT NULL,
+  title TEXT NOT NULL,
+  repro TEXT NOT NULL,
+  expected TEXT NOT NULL,
+  reference TEXT,
+  state TEXT NOT NULL,
+  root_cause TEXT,
+  fix_task TEXT,
+  fixed_sha TEXT,
+  regression_json TEXT,
+  verified_audit TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS findings_fingerprint ON findings (fingerprint);
+CREATE TABLE IF NOT EXISTS finding_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  finding_id TEXT NOT NULL,
+  audit_id TEXT,
+  job_id TEXT,
+  actor TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  evidence_json TEXT NOT NULL DEFAULT '[]',
+  commit_sha TEXT,
+  at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS root_causes (
+  rc_id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL UNIQUE,
+  audit_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  fix_task TEXT,
+  generation INTEGER NOT NULL DEFAULT 1,
+  created_at REAL NOT NULL
+);
 """
 
 OPEN_STATUSES = ("BLOCKED", "READY", "CLAIMED", "AWAITING_REVIEW", "REVIEWING", "LANDING", "NEEDS_TAKEOVER", "NEEDS_TRIAGE")

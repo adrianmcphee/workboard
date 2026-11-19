@@ -116,10 +116,28 @@ def train_cards(manifest: dict[str, object]) -> list[dict[str, object]]:
                  "Let them ride the following build, or review them now.")]
 
 
+def audit_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    cards = []
+    for row in conn.execute("SELECT finding_id, task_id, title FROM findings WHERE state='wont-fix-proposed'"):
+        cards.append(card("HIGH", "audit_decision", f"{row['finding_id']}: triage proposes not fixing it",
+                          f"{row['title']} (owned by `{row['task_id']}`). Only a person accepts a defect.",
+                          f"workboard audit decide {row['finding_id']} --wont-fix --note \"why\"  or  --reopen"))
+    for row in conn.execute("SELECT job_id, attempts, reason FROM audit_jobs WHERE status='NEEDS_TRIAGE'"):
+        cards.append(card("HIGH", "audit_parked", f"Audit job `{row['job_id']}` is parked after {row['attempts']} attempts",
+                          str(row["reason"] or "no reason recorded"), f"workboard audit requeue {row['job_id']}"))
+    live = conn.execute("SELECT COUNT(*) FROM findings WHERE severity='P0' AND state IN ('open','reopened')").fetchone()[0]
+    if live:
+        cards.append(card("CRITICAL", "audit_p0", f"{live} P0 finding(s) have no fix task yet",
+                          "A P0 blocks core work or loses work. Triage queues one fix task per root cause.",
+                          "workboard audit findings --untriaged"))
+    return cards
+
+
 def collect(cfg: Config, conn: sqlite3.Connection, snap: dict[str, object], slots: dict[str, int],
             manifest: dict[str, object]) -> list[dict[str, object]]:
     cards: list[dict[str, object]] = []
-    for source in (lambda: usage_cards(cfg, snap, slots), lambda: task_cards(conn), lambda: train_cards(manifest)):
+    for source in (lambda: usage_cards(cfg, snap, slots), lambda: task_cards(conn), lambda: train_cards(manifest),
+                   lambda: audit_cards(conn)):
         try:
             cards.extend(source())
         except Exception as exc:  # one broken source must not hide the others

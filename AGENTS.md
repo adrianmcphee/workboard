@@ -22,7 +22,7 @@ Work out which of these applies, then read that section.
 |---|---|
 | Set up or run Workboard on some other project | [Using Workboard on a project](#using-workboard-on-a-project) |
 | Change Workboard itself: fix a bug, add a feature, update the docs | [Working on Workboard](#working-on-workboard) |
-| Complete a task handed out by Workboard (your prompt starts with `<!-- workboard role=... -->`) | Nothing here. Follow the "Working agreement" or "Review assignment" in your prompt; it is complete. |
+| Complete a task handed out by Workboard (your prompt starts with `<!-- workboard role=... -->`) | Nothing here. Follow the "Working agreement", "Review assignment" or "Audit assignment" in your prompt; it is complete. |
 
 ## Vocabulary
 
@@ -39,6 +39,10 @@ Work out which of these applies, then read that section.
 | **Sign-off** | A person's accept or reject verdict on one slice of a build. A rejection creates a top-priority fix task. |
 | **Pace** | For each subscription: `under`, `on`, `over` or `reserve`, from its remaining allowance and reset time. |
 | **Intervention** | A decision Workboard leaves to a person, shown with the command that takes it. |
+| **Audit** | A repeatable re-examination of one built commit of main by several agents. |
+| **Audit job** | One claimable piece of an audit (`slice`, `checklist`, `verify`, `triage`), leased like a task but with no branch. |
+| **Finding** | A defect recorded during an audit, with a permanent ID (`F-0001`) and the task that owns it. |
+| **Root cause** | Findings that share one cause (`RC-0001`). Each has at most one fix task in flight. |
 
 ## The delivery cycle
 
@@ -48,6 +52,7 @@ Work out which of these applies, then read that section.
 4. **Land:** rebase, guard, locked fast-forward push (`LANDING`, then `DONE`).
 5. **Build:** `workboard build` at the scheduled times records a manifest.
 6. **Sign-off:** a person runs `workboard signoff accept|reject <task>`.
+7. **Audit:** `workboard audit open` creates audit jobs for a build; findings become root causes with one fix task each, and a later audit verifies each fix.
 
 Failures (quota stop, crash, timeout, failed review, landing conflict) send the task to `NEEDS_TAKEOVER`. After `max_attempts` it goes to `NEEDS_TRIAGE` and waits for a person.
 
@@ -132,6 +137,7 @@ workboard/            the package; the `workboard` command is workboard.cli:main
   usage.py            reads subscription allowance from local caches; burn rate, pace, claim verdict
   train.py            the build schedule: which build each slice is going for
   builds.py           runs builds, writes manifests, records sign-off verdicts
+  audits.py           audits of a build: audit jobs and their leases, findings, triage, fix reconciliation, reports
   interventions.py    the decisions shown to a person, with the command that takes each
   control.py          starts, resizes and stops workers; the closed list of dashboard operations
   dashboard.py        the local control-room page and its HTTP handler
@@ -154,11 +160,14 @@ Keep all of these. A change that needs to break one needs the user's agreement f
 9. **A quota stop is not an attempt.** It cools the harness down and requeues the task without using an attempt.
 10. **The dashboard binds to loopback.** Every write needs the page token in its custom header and a loopback `Host`. Only the operations listed in `control.py` exist.
 11. **A reviewer that writes no verdict has not rejected anything.** The review is offered to another harness.
+12. **Every audit job and finding change goes through `audits.py`,** inside one `store.write()` transaction, and leaves an event. Fix tasks are created with `tasks.insert` in the same transaction as their root cause.
+13. **A finding is fixed only by evidence and verified only by a later audit.** `fixed` needs a landed trailer on a commit that touches a regression path; `verified` needs a verify job in a later audit. Only a person turns a proposed `wont-fix` into a decision.
+14. **The audit checkout stays at its commit.** An agent's change to it is saved as a patch in the job's evidence and undone before the job is judged.
 
 ### Making a change
 
 1. Read the module that owns the behaviour (see the layout) and its tests.
-2. Write or change a test first. `tests/test_flow.py` drives the real worker loop end to end, `tests/test_queue.py` covers the state machine, and `tests/test_control_room.py` covers usage, prompts, builds, interventions and the dashboard. `tests/fake_agent.py` stands in for an agent CLI: it reads the `<!-- workboard role=... -->` header of its prompt and acts on it.
+2. Write or change a test first. `tests/test_flow.py` drives the real worker loop end to end, `tests/test_queue.py` covers the state machine, and `tests/test_control_room.py` covers usage, prompts, builds, interventions and the dashboard, and `tests/test_audit.py` covers audits end to end. `tests/fake_agent.py` stands in for an agent CLI: it reads the `<!-- workboard role=... -->` header of its prompt and acts on it.
 3. Run the suite: `python3 -m unittest discover -s tests -t .` It needs git and no network, and takes about 30 seconds.
 4. When behaviour or configuration changes, update in the same change: [README.md](README.md), `template.py` for any `workboard.toml` key, this file if a rule or the layout changes, and [CHANGELOG.md](CHANGELOG.md).
 

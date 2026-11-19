@@ -105,18 +105,27 @@ def add(conn: sqlite3.Connection, cfg: Config, task_id: str, title: str, brief: 
         paths: list[str] | None = None, depends_on: list[str] | None = None, harness: str | None = None,
         actor: str = "human", now: float | None = None) -> str:
     """Create a task that has no file in the repository; its brief lives in the state directory."""
+    with store.write(conn):
+        insert(conn, cfg, task_id, title, brief, priority=priority, paths=paths, depends_on=depends_on,
+               harness=harness, actor=actor, now=now)
+        queue._refresh(conn, cfg, now or time.time())
+    return task_id
+
+
+def insert(conn: sqlite3.Connection, cfg: Config, task_id: str, title: str, brief: str, priority: int = 100,
+           paths: list[str] | None = None, depends_on: list[str] | None = None, harness: str | None = None,
+           actor: str = "human", now: float | None = None) -> str:
+    """Create a file-less task inside the caller's transaction (see `add` for the standalone form)."""
     if not _ID.fullmatch(task_id):
         raise TaskError(f"id {task_id!r} must be lowercase letters, digits, dot, dash or underscore")
     now = now or time.time()
+    if conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone():
+        raise TaskError(f"task {task_id!r} already exists")
     brief_path = cfg.state / "briefs" / f"{task_id}.md"
     brief_path.parent.mkdir(parents=True, exist_ok=True)
     brief_path.write_text(brief, encoding="utf-8")
-    with store.write(conn):
-        if conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone():
-            raise TaskError(f"task {task_id!r} already exists")
-        upsert(conn, cfg, {"id": task_id, "title": title, "priority": priority, "harness": harness,
-                           "paths": paths or [], "depends_on": depends_on or [], "brief_path": str(brief_path)},
-               "queue", now)
-        store.event(conn, actor, "task_created", task_id, title, now)
-        queue._refresh(conn, cfg, now)
+    upsert(conn, cfg, {"id": task_id, "title": title, "priority": priority, "harness": harness,
+                       "paths": paths or [], "depends_on": depends_on or [], "brief_path": str(brief_path)},
+           "queue", now)
+    store.event(conn, actor, "task_created", task_id, title, now)
     return task_id

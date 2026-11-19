@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import __version__, builds, config, control, dashboard, interventions, queue, store, tasks, template, train, usage, worker
+from . import __version__, audits, builds, config, control, dashboard, interventions, queue, store, tasks, template, train, usage, worker
 
 
 def _open(args: argparse.Namespace):
@@ -56,6 +56,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     latest = snap["builds"]["latest"]  # type: ignore[index]
     if latest:
         print(f"  sign-off: build {latest['id']}, {len(latest['pending'])} of {len(latest['slices'])} awaiting a verdict")
+    view = snap.get("audits") or {}
+    if view.get("latest"):  # type: ignore[union-attr]
+        live = view["live_findings"]  # type: ignore[index]
+        print(f"  audit: {view['latest']['audit_id']} {view['latest']['status'].lower()}, "  # type: ignore[index]
+              f"live findings P0={live.get('P0', 0)} P1={live.get('P1', 0)} P2={live.get('P2', 0)}")
     cards = snap["interventions"]
     print(f"\npotential interventions ({len(cards)})")  # type: ignore[arg-type]
     for card in cards:  # type: ignore[union-attr]
@@ -208,6 +213,104 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    cfg, conn = _open(args)
+    act = args.audit_cmd
+    if act == "open":
+        result = audits.open_audit(cfg, conn, sha=args.sha, build_id=args.build, quick=args.quick)
+        if not result["opened"]:
+            print(f"{result['audit_id']}: {result['reason']}")
+            return 0
+        jobs = ", ".join(f"{n} {k}" for k, n in sorted(result["jobs"].items()))  # type: ignore[union-attr]
+        print(f"opened audit {result['audit_id']} of {str(result['sha'])[:9]}: {jobs}\ncheckout {result['worktree']}")
+        return 0
+    if act == "status":
+        view = audits.overview(conn)
+        latest = view["latest"]
+        if not latest:
+            print("no audit has been opened; run `workboard audit open` after a build")
+            return 0
+        print(f"audit {latest['audit_id']} ({latest['status'].lower()}) of {latest['sha'][:9]}")  # type: ignore[index]
+        print("  jobs: " + ("  ".join(f"{k}={v}" for k, v in sorted(view["jobs"].items())) or "none"))  # type: ignore[union-attr]
+        print("  live findings: " + ("  ".join(f"{k}={v}" for k, v in sorted(view["live_findings"].items())) or "none"))  # type: ignore[union-attr]
+        for finding in view["awaiting_decision"]:  # type: ignore[union-attr]
+            print(f"  {finding}: wont-fix proposed; decide with `workboard audit decide {finding} --wont-fix|--reopen`")
+        for job in view["parked_jobs"]:  # type: ignore[union-attr]
+            print(f"  {job}: parked after repeated attempts; `workboard audit requeue {job}`")
+        return 0
+    if act == "jobs":
+        audit = audits.resolve_audit(conn, args.audit)
+        for row in conn.execute("SELECT job_id, kind, status, attempts, lease_harness, finished_by, reason FROM audit_jobs "
+                                "WHERE audit_id=? ORDER BY job_id", (audit["audit_id"],)):
+            who = row["lease_harness"] or row["finished_by"] or ""
+            print(f"{row['status']:13s} {row['job_id']:48s} a{row['attempts']} {who:10s} {row['reason'] or ''}")
+        return 0
+    if act == "findings":
+        rows = audits.untriaged(conn) if args.untriaged else conn.execute(
+            "SELECT * FROM findings" + (" WHERE state=?" if args.state else "") + " ORDER BY seq",
+            (args.state,) if args.state else ()).fetchall()
+        if args.json:
+            print(json.dumps([dict(r) for r in rows], indent=2))
+            return 0
+        for row in rows:
+            print(f"{row['finding_id']} {row['severity']} {row['state']:17s} {row['task_id']:24s} {row['root_cause'] or '':8s} {row['title']}")
+        return 0
+    if act == "show":
+        row = conn.execute("SELECT * FROM findings WHERE finding_id=?", (args.finding,)).fetchone()
+        if row is None:
+            print(f"unknown finding {args.finding}")
+            return 1
+        for key in ("finding_id", "severity", "state", "task_id", "title", "repro", "expected", "reference", "step",
+                    "refs_json", "root_cause", "fix_task", "fixed_sha", "regression_json", "verified_audit"):
+            print(f"{key:15s} {row[key]}")
+        for note in conn.execute("SELECT at, actor, kind, note, commit_sha FROM finding_notes WHERE finding_id=? ORDER BY id", (args.finding,)):
+            when = datetime.fromtimestamp(note["at"]).strftime("%m-%d %H:%M")
+            print(f"  {when} {note['kind']:20s} {note['actor']} {note['note']} {note['commit_sha'] or ''}".rstrip())
+        return 0
+    if act == "file":
+        result = audits.file_finding(cfg, conn, task_id=args.task, severity=args.severity, title=args.title, repro=args.repro,
+                                     expected=args.expected, job_id=args.job, audit_id=args.audit, refs=args.ref,
+                                     step=args.step, reference=args.reference, evidence=args.evidence)
+        print(f"{result['finding_id']} {'filed' if result['created'] else 'already filed; sighting added'}")
+        return 0
+    if act == "verify":
+        result = audits.verify(conn, args.finding, args.result, job_id=args.job, audit_id=args.audit, note=args.note,
+                               evidence=args.evidence)
+        print(f"{result['finding_id']} {result['state']}")
+        return 0
+    if act == "triage":
+        if args.group:
+            result = audits.triage_group(cfg, conn, [f.strip() for f in args.group.split(",") if f.strip()], title=args.title,
+                                         severity=args.severity, task_id=args.task, root_cause=args.root_cause,
+                                         job_id=args.job, audit_id=args.audit)
+            print(f"{result['root_cause']} -> {result['fix_task']}" + (" (queued)" if result["queued"] else " (already in flight)"))
+            return 0
+        target, state = (args.duplicate, "duplicate") if args.duplicate else (args.propose_wont_fix, "wont-fix-proposed")
+        if not target:
+            raise audits.AuditError("triage needs --group, --duplicate or --propose-wont-fix")
+        result = audits.mark(conn, target, state, args.note, job_id=args.job, audit_id=args.audit)
+        print(f"{result['finding_id']} {result['state']}")
+        return 0
+    if act == "decide":
+        result = audits.mark(conn, args.finding, "wont-fix" if args.wont_fix else "open", args.note, audit_id=args.audit)
+        print(f"{result['finding_id']} {result['state']}")
+        return 0
+    if act == "requeue":
+        audits.requeue_job(conn, args.job)
+        print(f"{args.job} requeued")
+        return 0
+    if act == "reconcile":
+        result = audits.reconcile(cfg, conn)
+        print(f"fixed: {', '.join(result['fixed']) or 'none'}; trailers without a regression test: {', '.join(result['refused']) or 'none'}")
+        return 0
+    summary = audits.report(cfg, conn, args.audit)
+    print(json.dumps(summary, indent=2) if args.json else
+          f"audit {summary['audit_id']} {str(summary['status']).lower()}: {summary['findings_new']} new finding(s), "
+          f"{summary['verified_here']} fix(es) verified, {summary['reopened_here']} reopened, "
+          f"{len(summary['escapes'])} escape(s); report in {audits.audit_dir(cfg, str(summary['audit_id'])) / 'report.md'}")  # type: ignore[arg-type]
+    return 0
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     cfg, _ = _open(args)
     server = dashboard.serve(cfg, args.host, args.port)
@@ -271,6 +374,53 @@ def parser() -> argparse.ArgumentParser:
     add("usage", cmd_usage, "subscription allowance, resets and pace").add_argument("--json", action="store_true")
     add("interventions", cmd_interventions, "decisions waiting on a human").add_argument("--json", action="store_true")
     add("events", cmd_events, "the event log").add_argument("--limit", type=int, default=40)
+    p = add("audit", cmd_audit, "audit what landed and track every defect to a verified fix")
+    asub = p.add_subparsers(dest="audit_cmd", required=True)
+    a = asub.add_parser("open", help="open an audit of the latest good build (or --build, or --sha)")
+    a.add_argument("--build")
+    a.add_argument("--sha")
+    a.add_argument("--quick", action="store_true", help="only verify fixes and run checklists marked quick")
+    asub.add_parser("status", help="the latest audit, live findings and decisions waiting on a person")
+    asub.add_parser("jobs", help="the jobs of an audit").add_argument("--audit")
+    a = asub.add_parser("findings", help="list findings")
+    a.add_argument("--untriaged", action="store_true")
+    a.add_argument("--state")
+    a.add_argument("--json", action="store_true")
+    asub.add_parser("show", help="one finding with its history").add_argument("finding")
+    a = asub.add_parser("file", help="record a defect (agents pass --job; a person may pass --audit or nothing)")
+    for flag in ("--job", "--audit", "--step", "--reference"):
+        a.add_argument(flag)
+    a.add_argument("--task", required=True, help="the task that owns the defect")
+    a.add_argument("--severity", required=True, choices=audits.SEVERITIES)
+    a.add_argument("--title", required=True)
+    a.add_argument("--repro", required=True)
+    a.add_argument("--expected", required=True)
+    a.add_argument("--ref", action="append", default=[])
+    a.add_argument("--evidence", action="append", default=[])
+    a = asub.add_parser("verify", help="record whether a fixed finding is fixed in this build")
+    a.add_argument("finding")
+    a.add_argument("--result", required=True, choices=("verified", "reopened"))
+    a.add_argument("--job")
+    a.add_argument("--audit")
+    a.add_argument("--note", default="")
+    a.add_argument("--evidence", action="append", default=[])
+    a = asub.add_parser("triage", help="group findings into a root cause with one fix task, or mark them")
+    for flag in ("--job", "--audit", "--group", "--title", "--task", "--root-cause", "--duplicate", "--propose-wont-fix"):
+        a.add_argument(flag)
+    a.add_argument("--severity", choices=audits.SEVERITIES)
+    a.add_argument("--note", default="")
+    a = asub.add_parser("decide", help="a person's decision on a proposed wont-fix")
+    a.add_argument("finding")
+    group = a.add_mutually_exclusive_group(required=True)
+    group.add_argument("--wont-fix", action="store_true")
+    group.add_argument("--reopen", action="store_true")
+    a.add_argument("--note", default="")
+    a.add_argument("--audit")
+    asub.add_parser("requeue", help="give a parked or finished audit job another run").add_argument("job")
+    asub.add_parser("reconcile", help="mark findings fixed from landed trailers")
+    a = asub.add_parser("report", help="write the audit's report and print its numbers")
+    a.add_argument("--audit")
+    a.add_argument("--json", action="store_true")
     p = add("dashboard", cmd_dashboard, "serve the control room page")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
@@ -281,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         return int(args.fn(args) or 0)
-    except (config.ConfigError, tasks.TaskError, ValueError, KeyError, RuntimeError) as exc:
+    except (config.ConfigError, tasks.TaskError, audits.AuditError, ValueError, KeyError, RuntimeError) as exc:
         print(f"workboard: {exc}", file=sys.stderr)
         return 2
 

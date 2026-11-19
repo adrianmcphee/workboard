@@ -105,8 +105,12 @@ def _lease(conn: sqlite3.Connection, cfg: Config, row: sqlite3.Row, status: str,
 
 def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid: int, *,
           usage_verdict: dict[str, object] | None = None, task_id: str | None = None,
-          now: float | None = None, load: float | None = None, alive=pid_alive) -> dict[str, object]:
-    """Hand one unit of work to a worker: a review first, then a takeover, then fresh work."""
+          now: float | None = None, load: float | None = None, alive=pid_alive,
+          review_only: bool = False) -> dict[str, object]:
+    """Hand one unit of work to a worker: a review first, then a takeover, then fresh work.
+
+    With `review_only`, stop after the review step, so the worker can offer audit work next.
+    """
     now = now or time.time()
     with store.write(conn):
         _refresh(conn, cfg, now, alive)
@@ -133,6 +137,8 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
                     break
             if pick is not None:
                 return _lease(conn, cfg, pick, "REVIEWING", "review", harness, worker, pid, cfg.review_lease_min, now)
+        if review_only:
+            return {"claimed": False, "reason": "no_review_work"}
 
         coding = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='CLAIMED'").fetchone()[0]
         if coding >= cfg.max_coding:
@@ -180,6 +186,16 @@ def _held(conn: sqlite3.Connection, task_id: str, token: str) -> sqlite3.Row | N
     return conn.execute("SELECT * FROM tasks WHERE task_id=? AND lease_token=?", (task_id, token)).fetchone()
 
 
+def cool_down(conn: sqlite3.Connection, cfg: Config, harness: str, task_id: str | None, now: float) -> None:
+    """Rest a harness that hit its usage limit. Runs inside the caller's transaction."""
+    harness_cfg = cfg.harnesses.get(harness)
+    until = now + (harness_cfg.cooldown_min if harness_cfg else 30) * 60.0
+    conn.execute("INSERT INTO harness_state (harness, cooldown_until, last_error) VALUES (?,?,'quota') "
+                 "ON CONFLICT(harness) DO UPDATE SET cooldown_until=excluded.cooldown_until, last_error='quota'",
+                 (harness, until))
+    store.event(conn, "system", "harness_cooldown", task_id, f"{harness} until {int(until)}", now)
+
+
 def finish_author(conn: sqlite3.Connection, cfg: Config, task_id: str, token: str, *, ok: bool,
                   candidate_sha: str | None = None, reason: str = "", quota: bool = False,
                   now: float | None = None) -> str | None:
@@ -191,12 +207,7 @@ def finish_author(conn: sqlite3.Connection, cfg: Config, task_id: str, token: st
             return None
         harness = row["lease_harness"]
         if quota:
-            harness_cfg = cfg.harnesses.get(harness)
-            until = now + (harness_cfg.cooldown_min if harness_cfg else 30) * 60.0
-            conn.execute("INSERT INTO harness_state (harness, cooldown_until, last_error) VALUES (?,?,'quota') "
-                         "ON CONFLICT(harness) DO UPDATE SET cooldown_until=excluded.cooldown_until, last_error='quota'",
-                         (harness, until))
-            store.event(conn, "system", "harness_cooldown", task_id, f"{harness} until {int(until)}", now)
+            cool_down(conn, cfg, harness, task_id, now)
         if ok:
             status = "AWAITING_REVIEW" if cfg.review_required else "LANDING"
             conn.execute(f"UPDATE tasks SET status=?, candidate_sha=?, author_harness=?, avoid_harness=NULL, reason=NULL, "

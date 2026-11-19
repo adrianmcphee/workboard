@@ -4,9 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import tomllib
 
 CONFIG_NAME = "workboard.toml"
+DEFAULT_REGRESSION_PATHS = ("tests/**", "test/**", "spec/**", "**/tests/**", "**/test_*", "**/*_test.*", "**/*.test.*",
+                            "**/*.spec.*")
 
 
 @dataclass
@@ -55,6 +58,13 @@ class Config:
     build_cutoff_min: int = 30
     usage_policy: str = "enforce"    # off | advise | enforce
     usage_reserve_pct: float = 3.0
+    audit_checklists: Path = Path("workboard/audits")
+    audit_per_slice: bool = True
+    audit_lease_min: int = 60
+    audit_prepare: str = ""
+    audit_refs_command: str = ""
+    audit_regression_paths: list[str] = field(default_factory=lambda: list(DEFAULT_REGRESSION_PATHS))
+    audit_trailer: str = "Fixes"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8787
     harnesses: dict[str, Harness] = field(default_factory=dict)
@@ -110,7 +120,7 @@ def load(root: Path | None = None) -> Config:
         raise ConfigError(f"{path}: {exc}") from exc
     project, limits = data.get("project", {}), data.get("limits", {})
     review, build, usage = data.get("review", {}), data.get("build", {}), data.get("usage", {})
-    dash = data.get("dashboard", {})
+    dash, audit = data.get("dashboard", {}), data.get("audit", {})
 
     def rel(value: str) -> Path:
         candidate = Path(os.path.expanduser(str(value)))
@@ -145,9 +155,18 @@ def load(root: Path | None = None) -> Config:
         build_cutoff_min=int(build.get("cutoff_min", 30)),
         usage_policy=str(usage.get("policy", "enforce")),
         usage_reserve_pct=float(usage.get("reserve_pct", 3)),
+        audit_checklists=rel(audit.get("checklists", "workboard/audits")),
+        audit_per_slice=bool(audit.get("per_slice", True)),
+        audit_lease_min=int(audit.get("lease_min", 60)),
+        audit_prepare=str(audit.get("prepare", "")),
+        audit_refs_command=str(audit.get("refs_command", "")),
+        audit_regression_paths=[str(p) for p in audit.get("regression_paths", DEFAULT_REGRESSION_PATHS)],
+        audit_trailer=str(audit.get("trailer", "Fixes")),
         dashboard_host=str(dash.get("host", "127.0.0.1")),
         dashboard_port=int(dash.get("port", 8787)),
     )
+    if not re.fullmatch(r"[A-Za-z][A-Za-z-]*", cfg.audit_trailer):
+        raise ConfigError("[audit] trailer must be a word such as Fixes")
     if cfg.usage_policy not in ("off", "advise", "enforce"):
         raise ConfigError("[usage] policy must be off, advise or enforce")
     for name, raw in data.get("harness", {}).items():

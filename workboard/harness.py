@@ -25,10 +25,12 @@ def build_command(harness: Harness, worktree: Path, prompt_file: Path) -> list[s
 
 
 def run(harness: Harness, worktree: Path, prompt_file: Path, log: Path, *, beat: Callable[[], bool],
-        beat_every_s: float, deadline: float, should_stop: Callable[[], bool] = lambda: False) -> int:
+        beat_every_s: float, deadline: float, should_stop: Callable[[], bool] = lambda: False,
+        extra_env: dict[str, str] | None = None) -> int:
     """Run the agent to completion. `beat` returns False once the lease is gone, which stops the agent."""
     env = {k: v for k, v in os.environ.items() if k not in harness.env_unset}
     env.update(harness.env)
+    env.update(extra_env or {})
     command = build_command(harness, worktree, prompt_file)
     with open(log, "ab") as fh:
         try:

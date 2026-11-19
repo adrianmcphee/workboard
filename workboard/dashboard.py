@@ -11,7 +11,7 @@ import shutil
 import time
 from urllib.parse import urlparse
 
-from . import builds, control, interventions, queue, store, train, usage, worker
+from . import audits, builds, control, interventions, queue, store, train, usage, worker
 from .config import Config
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -61,6 +61,7 @@ def snapshot(cfg: Config) -> dict[str, object]:
             "load": round(os.getloadavg()[0], 1), "cores": os.cpu_count(),
             "usage": snap, "usage_lines": usage.lines(snap), "train": manifest, "builds": builds.summary(cfg),
             "interventions": interventions.collect(cfg, conn, snap, slots, manifest), "events": events,
+            "audits": audits.overview(conn),
         }
     finally:
         conn.close()
