@@ -78,6 +78,9 @@ def render(cfg: Config, claim: dict[str, object], harness: str, worktree: Path,
     parts = [f"<!-- workboard role={role} task={task_id} handoff={handoff} verdict={verdict_path(cfg, task_id)} -->",
              f"# Task `{task_id}`: {claim['title']}", "", brief_body(Path(str(claim["brief_path"])))]
     guards = "\n".join(f"  - `{g}`" for g in cfg.guards) or "  - (none configured)"
+    notes = handoff / "notes.md"
+    queued = (" When the machine is busy a heavy command waits for a compile slot and says so: let it wait, and do not "
+              "cancel and retry it.") if cfg.compile_slots > 0 and cfg.compile_tools else ""
     if role == "author":
         takeover = takeover_path(cfg, task_id)
         if takeover.is_file():
@@ -87,17 +90,19 @@ def render(cfg: Config, claim: dict[str, object], harness: str, worktree: Path,
         parts += ["", "## Working agreement", f"""- Work only in `{worktree}`, on branch `{claim['branch']}`. It was opened from `{cfg.remote_main}`.
 - You have **{lease} minutes**. Commit early; a lease that ends with no commit loses the work in progress.
 - Deliver the whole outcome the brief describes, with the smallest test that fails without it. No placeholders.
+- Build and test only what this task touches, and run one heavy build or test command at a time.{queued} Where the brief names a command for its acceptance, run that command once, near the end. Where the brief says how to build or test, follow the brief.
 - Commit in small linear commits. Stage explicit paths. Never create a merge commit, never push, never switch branch.
 - Finish with `git status` completely clean and every guard passing:
 {guards}
-- Write a short note on what you did and what remains to `{handoff / 'notes.md'}`.
+- Write a short note on what you did and what remains to `{notes}`, ending with a `## Commands run` section: every build and test command you ran, exactly as typed, with its result. The reviewer judges your tests from it.
 - Then stop. An independent reviewer checks the branch, and Workboard lands it on `{cfg.main}`."""]
     else:
         parts += ["", "## Review assignment", f"""You are the independent reviewer of the branch in `{worktree}`. You have **{lease} minutes**.
 - Read `git log --stat {cfg.remote_main}..HEAD` and `git diff {cfg.remote_main}...HEAD` against the brief above and the project rules below.
 - Check that the outcome is complete, that the test would fail without the change, and that nothing unrelated changed.
-- You may run these guards:
+- Judge the tests from the guards and from the `## Commands run` section of the author's notes in `{notes}`. You may run these guards:
 {guards}
+- Fail the branch when neither the guards nor those recorded commands show its new or changed tests passing. How the author built is never a reason to fail it.
 - Do **not** modify, commit or stash anything in the worktree.
 - Write your verdict as JSON to `{verdict_path(cfg, task_id)}`:
   `{{"passed": true, "summary": "..."}}` or `{{"passed": false, "defects": ["file:line what is wrong and why", "..."]}}`

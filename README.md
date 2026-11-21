@@ -294,6 +294,7 @@ BLOCKED -> READY -> CLAIMED -> AWAITING_REVIEW -> REVIEWING -> LANDING -> DONE
 - **NEEDS_TRIAGE:** the attempt limit was reached. Workers stop claiming the task until a human runs `workboard requeue`.
 - **A quota stop is not an attempt.** When an agent's output matches a `quota_patterns` entry, that harness cools down and the task returns to the queue without spending an attempt.
 - **A reviewer that writes no verdict has not rejected anything.** The review is offered to another harness.
+- **Authors build and test only what their task touches,** one heavy command at a time, and end their notes with a `## Commands run` section. Reviewers judge the tests from that record and the guards, and never fail a branch for how it was built. A command the brief names for its acceptance runs once, near the end.
 
 Every transition is one transaction and one row in the event log, with the actor that caused it (`workboard events`, `workboard show <task>`).
 

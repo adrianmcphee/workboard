@@ -99,6 +99,28 @@ class TrainAndPrompt(ProjectCase):
         self.assertNotIn(chr(0x2014), rendered)
 
 
+    def test_build_rules_are_stated_once_and_agree_between_author_and_reviewer(self) -> None:
+        self.task("rules")
+        self.sync()
+        claim = queue.claim(self.conn, self.cfg, "alpha", "w", 1, alive=lambda _p: True)
+        author = prompt.render(self.cfg, claim, "alpha", self.cfg.worktree("rules"), self.conn)
+        notes = str(self.cfg.handoff("rules") / "notes.md")
+        self.assertIn("Build and test only what this task touches", author)
+        self.assertIn("one heavy build or test command at a time", author)
+        self.assertIn("acceptance", author)
+        self.assertIn("## Commands run", author)
+        self.assertIn(notes, author)
+        self.assertNotIn("compile slot", author)  # no queue configured, so none is mentioned
+        self.cfg.compile_slots, self.cfg.compile_tools = 2, {"cargo": {"subcommands": ["build"], "flags": [], "value_options": []}}
+        self.assertIn("compile slot", prompt.render(self.cfg, claim, "alpha", self.cfg.worktree("rules"), self.conn))
+        queue.finish_author(self.conn, self.cfg, "rules", str(claim["token"]), ok=True, candidate_sha="c" * 40)
+        review = queue.claim(self.conn, self.cfg, "beta", "r", 1, alive=lambda _p: True)
+        reviewer = prompt.render(self.cfg, review, "beta", self.cfg.worktree("rules"), self.conn)
+        self.assertIn(notes, reviewer)
+        self.assertIn("## Commands run", reviewer)
+        self.assertIn("How the author built is never a reason to fail", reviewer)
+
+
 class BuildsAndSignoff(ProjectCase):
     def land(self, task_id: str, body: str = "x") -> None:
         self.task(task_id, body=body, paths="[src/a]")
