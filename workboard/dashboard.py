@@ -11,7 +11,7 @@ import shutil
 import time
 from urllib.parse import urlparse
 
-from . import audits, builds, control, interventions, queue, store, train, usage, worker
+from . import audits, builds, compile_queue, control, interventions, queue, store, train, usage, worker
 from .config import Config
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -51,6 +51,7 @@ def snapshot(cfg: Config) -> dict[str, object]:
                 first = next((b for b in manifest["builds"] if b["build"] >= reset_id), None)  # type: ignore[union-attr]
                 if first is not None:
                     first["resets_before"].append(entry["harness"])
+        compiling = compile_queue.view(cfg.state, cfg.compile_slots) if cfg.compile_slots > 0 else {"enabled": False}
         events = [dict(r) for r in conn.execute("SELECT at, actor, kind, task_id, detail FROM events ORDER BY id DESC LIMIT 60")]
         for ev in events:
             ev["time"] = datetime.fromtimestamp(ev["at"]).strftime("%H:%M:%S")
@@ -60,7 +61,8 @@ def snapshot(cfg: Config) -> dict[str, object]:
             "free_gib": round(shutil.disk_usage(cfg.state).free / 2**30, 1),
             "load": round(os.getloadavg()[0], 1), "cores": os.cpu_count(),
             "usage": snap, "usage_lines": usage.lines(snap), "train": manifest, "builds": builds.summary(cfg),
-            "interventions": interventions.collect(cfg, conn, snap, slots, manifest), "events": events,
+            "interventions": interventions.collect(cfg, conn, snap, slots, manifest, compiling), "events": events,
+            "compile": compiling,
             "audits": audits.overview(conn), "draining": queue.draining(conn),
         }
     finally:
@@ -91,7 +93,7 @@ th{font-size:12px;color:var(--muted);font-weight:600}.scroll{max-height:360px;ov
 </style></head><body>
 <header><h1>Workboard</h1><span id="project" class="muted"></span><span id="clock" class="muted mono"></span></header>
 <main>
-<section class="wide"><div class="kpis" id="kpis"></div></section>
+<section class="wide"><div class="kpis" id="kpis"></div><p class="muted mono" id="compile"></p></section>
 <section><h2>Potential interventions</h2><div id="result" class="mono"></div><div id="interventions"></div></section>
 <section><h2>Subscriptions</h2><div id="usage"></div><h2 style="margin-top:14px">Build train</h2><div id="train"></div></section>
 <section class="wide"><h2>Latest build and sign-off <span id="buildhead" class="mono"></span></h2><div id="builds"></div></section>
@@ -116,6 +118,7 @@ function render(s){ACTS=[];
  document.getElementById('clock').textContent=`${s.generated_at} · load ${s.load}/${s.cores} · ${s.free_gib} GiB free`;
  const order=['DONE','LANDING','REVIEWING','AWAITING_REVIEW','CLAIMED','READY','BLOCKED','NEEDS_TAKEOVER','NEEDS_TRIAGE','CANCELLED'];
  document.getElementById('kpis').innerHTML=order.filter(k=>s.counts[k]).map(k=>`<div class="kpi"><b>${s.counts[k]}</b><span class="muted">${k.replace(/_/g,' ').toLowerCase()}</span></div>`).join('')||'<span class="muted">No tasks yet. Add files to the tasks folder and run workboard sync.</span>';
+ {const q=s.compile||{};document.getElementById('compile').textContent=q.enabled?`Compile queue: ${q.holders.length}/${q.slots} slot(s) held, ${q.waiters.length} waiting, longest wait ${Math.round(q.longest_wait_s/60)} min, recent p90 wait ${Math.round(q.recent_p90_wait_s)} s`+(q.memory&&q.memory.mem_available_pct!=null?`, ${Math.round(q.memory.mem_available_pct)}% memory free`:''):''}
  document.getElementById('interventions').innerHTML=s.interventions.length?s.interventions.map(c=>`<div class="card ${esc(c.severity)}"><p><b>${esc(c.title)}</b></p><p>${esc(c.what)}</p><p class="mono">${esc(c.action)}</p>${c.ops.map(o=>btn(o)).join('')}</div>`).join(''):'<p class="muted">No decision is waiting on you.</p>';
  document.getElementById('usage').innerHTML=s.usage.harnesses.map(h=>{
   const head=`<p><b>${esc(h.harness)}</b> <span class="muted">${h.live_slots} worker(s)${h.target_slots==null?'':' of '+h.target_slots}${h.age_s==null?'':' · read '+Math.round(h.age_s/60)+'m ago'+(h.stale?' (stale)':'')}</span></p>`;

@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 from typing import Iterator
 
+from . import compile_queue
 from .config import Config
 
 PUSH_RETRIES = 4
@@ -72,7 +73,7 @@ def run_guards(cfg: Config, worktree: Path, log: Path, env: dict[str, str] | Non
             fh.write(f"\n$ {command}\n".encode())
             fh.flush()
             result = subprocess.run(command, shell=True, cwd=str(worktree), stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, env={**os.environ, **(env or {})}, check=False)
+                                    stderr=subprocess.STDOUT, env={**os.environ, **compile_queue.env(cfg), **(env or {})}, check=False)
             fh.write(result.stdout)
         if result.returncode:
             tail = result.stdout.decode("utf-8", errors="replace")[-1500:]
@@ -111,7 +112,7 @@ def land(cfg: Config, task_id: str, branch: str, log: Path) -> tuple[bool, str]:
         with land_lock(cfg):
             with open(log, "ab") as fh:
                 result = subprocess.run(cfg.land_command, shell=True, cwd=str(worktree), stdout=fh,
-                                        stderr=subprocess.STDOUT, env={**os.environ, **env}, check=False)
+                                        stderr=subprocess.STDOUT, env={**os.environ, **compile_queue.env(cfg), **env}, check=False)
             if result.returncode:
                 return False, f"land command exited {result.returncode}"
             fetch(cfg)

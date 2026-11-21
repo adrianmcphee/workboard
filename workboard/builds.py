@@ -15,7 +15,7 @@ import sqlite3
 import subprocess
 import time
 
-from . import gitops, store, tasks, train
+from . import compile_queue, gitops, store, tasks, train
 from .config import Config
 
 SLOT_TOLERANCE = timedelta(minutes=25)
@@ -131,7 +131,7 @@ def run(cfg: Config, conn: sqlite3.Connection, now: datetime | None = None) -> d
     log = logs / f"build-{started.strftime('%Y%m%d-%H%M%S')}.log"
     with open(log, "ab") as fh:
         done = subprocess.run(cfg.build_command, shell=True, cwd=str(worktree), stdout=fh, stderr=subprocess.STDOUT,
-                              env={**os.environ, "WORKBOARD_BUILD_SHA": sha}, check=False)
+                              env={**os.environ, **compile_queue.env(cfg), "WORKBOARD_BUILD_SHA": sha}, check=False)
     return record(cfg, conn, sha, "built" if done.returncode == 0 else "failed", started, str(log))
 
 

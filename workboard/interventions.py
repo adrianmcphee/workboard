@@ -144,11 +144,25 @@ def fleet_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
                  "Reviews and landing continue.", "workboard resume")]
 
 
+def compile_cards(cfg: Config, view: dict[str, object] | None) -> list[dict[str, object]]:
+    """Builds that wait long while memory sits free mean the compile queue has too few slots."""
+    if not view or not view.get("enabled"):
+        return []
+    wait_min = float(view.get("longest_wait_s") or 0) / 60.0
+    free = (view.get("memory") or {}).get("mem_available_pct")  # type: ignore[union-attr]
+    if wait_min < cfg.compile_alert_wait_min or free is None or float(free) < cfg.compile_alert_free_pct:
+        return []
+    waiting = len(view.get("waiters") or [])  # type: ignore[arg-type]
+    return [card("MEDIUM", "compile_wait", f"Builds wait {wait_min:.0f} min for a compile slot while {float(free):.0f}% of memory is free",
+                 f"{waiting} build(s) queued behind {cfg.compile_slots} slot(s). Memory has room, so the slot count is "
+                 "what holds them back.", f"Raise [compile] slots in workboard.toml (now {cfg.compile_slots}) and restart the workers.")]
+
+
 def collect(cfg: Config, conn: sqlite3.Connection, snap: dict[str, object], slots: dict[str, int],
-            manifest: dict[str, object]) -> list[dict[str, object]]:
+            manifest: dict[str, object], compiling: dict[str, object] | None = None) -> list[dict[str, object]]:
     cards: list[dict[str, object]] = []
     for source in (lambda: usage_cards(cfg, snap, slots), lambda: task_cards(conn), lambda: train_cards(manifest),
-                   lambda: audit_cards(conn), lambda: fleet_cards(conn)):
+                   lambda: audit_cards(conn), lambda: fleet_cards(conn), lambda: compile_cards(cfg, compiling)):
         try:
             cards.extend(source())
         except Exception as exc:  # one broken source must not hide the others

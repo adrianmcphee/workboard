@@ -10,7 +10,7 @@ import signal
 import sqlite3
 import time
 
-from . import audits, gitops, harness as runner, prompt, queue, store, usage
+from . import audits, compile_queue, gitops, harness as runner, prompt, queue, store, usage
 from .config import Config
 
 IDLE_SLEEP_S = 5.0
@@ -159,6 +159,10 @@ class Worker:
         else:
             queue.finish_review(self.conn, self.cfg, task_id, token, "incomplete", reason)
 
+    def _queue_env(self) -> dict[str, str]:
+        """Heavy build commands the agent runs go through the compile queue, when one is configured."""
+        return compile_queue.env(self.cfg, self.harness.env.get("PATH"))
+
     def _run_agent(self, claim: dict[str, object], worktree: Path, log: Path) -> int:
         task_id, token = str(claim["task_id"]), str(claim["token"])
         prompt_file = self.cfg.handoff(task_id) / f"prompt-{claim['role']}.md"
@@ -167,7 +171,7 @@ class Worker:
             self.harness, worktree, prompt_file, log,
             beat=lambda: queue.heartbeat(self.conn, self.cfg, task_id, token),
             beat_every_s=self.cfg.heartbeat_s, deadline=time.time() + int(claim["lease_min"]) * 60.0,  # type: ignore[arg-type]
-            should_stop=lambda: self.stop)
+            should_stop=lambda: self.stop, extra_env=self._queue_env())
 
     def author(self, claim: dict[str, object]) -> None:
         task_id, token, branch = str(claim["task_id"]), str(claim["token"]), str(claim["branch"])
@@ -237,7 +241,7 @@ class Worker:
             self.harness, worktree, prompt_file, log,
             beat=lambda: audits.heartbeat(self.conn, self.cfg, job_id, token),
             beat_every_s=self.cfg.heartbeat_s, deadline=time.time() + int(job["lease_min"]) * 60.0,  # type: ignore[arg-type]
-            should_stop=lambda: self.stop, extra_env={"WORKBOARD_ROOT": str(self.cfg.root)})
+            should_stop=lambda: self.stop, extra_env={**self._queue_env(), "WORKBOARD_ROOT": str(self.cfg.root)})
         quota = code != 0 and runner.quota_hit(self.harness, log)
         changed = restore_audit_checkout(worktree, str(job["sha"]), evidence)
         try:

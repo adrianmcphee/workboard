@@ -297,6 +297,28 @@ BLOCKED -> READY -> CLAIMED -> AWAITING_REVIEW -> REVIEWING -> LANDING -> DONE
 
 Every transition is one transaction and one row in the event log, with the actor that caused it (`workboard events`, `workboard show <task>`).
 
+## The compile queue
+
+Several agents building at once can run a machine out of memory long before it runs out of cores: the memory compressor and swap then slow every build down together. `[compile]` puts heavy builds in a queue with a fixed number of slots, so extra builds wait their turn instead of thrashing.
+
+```toml
+[compile]
+slots = 3                     # about RAM / peak GiB of one heavy build
+
+[compile.tools.cargo]
+subcommands = ["build", "test", "check", "clippy", "nextest", "run", "bench", "rustc", "doc"]
+value_options = ["-C", "--config", "-Z", "--color"]
+
+[compile.tools.cmake]
+flags = ["--build"]
+```
+
+- Every agent, guard, landing and scheduled build runs with a shim directory first on its `PATH`, one shim per tool listed. A heavy invocation (a listed subcommand as the first word, or a listed flag anywhere; the value after a `value_options` entry is skipped) holds one slot for its whole life. Anything else, and anything started inside a heavy command, runs straight away.
+- Waiters line up behind one queue lock, so a build that just arrived never overtakes one that has waited for minutes.
+- Every heavy command appends `queued`, `acquired` (with `wait_s`), `released` (with `hold_s`) and, if it was stopped while waiting, `abandoned` to `.workboard/compile/events.jsonl`, with the working directory, the command and a memory reading (total, share available, and the compressor size on macOS). Use it to size `slots` from measurements rather than guesses.
+- `workboard status` and the dashboard show slots held, builds waiting, the longest wait and free memory. When builds wait longer than `alert_wait_min` while at least `alert_free_pct` of memory is free, an intervention says the slot count is what holds them back.
+- The queue only governs commands that resolve through `PATH`. A build started outside Workboard, or one that names a tool by absolute path, is not queued.
+
 ## Landing
 
 With `[land] command` empty, Workboard lands a branch itself:
@@ -456,6 +478,7 @@ Lowering `--slots` never kills an agent: the extra workers finish their current 
 | `.workboard/handoffs/<task>/` | Rendered prompts, takeover notes, review verdict |
 | `.workboard/logs/` | Agent, landing, build and worker output |
 | `.workboard/builds/` | Build records and sign-off verdicts |
+| `.workboard/compile/` | Compile queue slot locks, shims and `events.jsonl` |
 | `workboard/audits/*.md` | Audit checklists, committed with the project |
 | `.workboard/audits/<audit>/` | Per job: brief, prompts, evidence, result; per audit: `report.md`, `summary.json`, `findings.jsonl` |
 | `.worktrees/_audit-<audit>/` | The read-only checkout of the audited commit |

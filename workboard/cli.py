@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import __version__, audits, builds, config, control, dashboard, interventions, queue, store, tasks, template, train, usage, worker
+from . import __version__, audits, builds, compile_queue, config, control, dashboard, interventions, queue, store, tasks, template, train, usage, worker
 
 
 def _open(args: argparse.Namespace):
@@ -49,6 +49,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     counts = snap["counts"]
     print(f"{snap['project']}  {snap['generated_at']}  load {snap['load']}/{snap['cores']}  {snap['free_gib']} GiB free")
     print("  " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())) if counts else "  no tasks")  # type: ignore[union-attr]
+    queue_view = snap.get("compile") or {}
+    if queue_view.get("enabled"):  # type: ignore[union-attr]
+        mem = queue_view.get("memory") or {}  # type: ignore[union-attr]
+        print(f"  compile: {len(queue_view['holders'])}/{queue_view['slots']} slot(s) held, "  # type: ignore[index]
+              f"{len(queue_view['waiters'])} waiting, longest wait {round(queue_view['longest_wait_s'] / 60)}m"  # type: ignore[index]
+              + (f", {mem['mem_available_pct']:.0f}% memory free" if mem.get("mem_available_pct") is not None else ""))
     if snap.get("draining"):
         print("  fleet: draining (no new authoring or audit jobs); `workboard resume` undoes it")
     for line in snap["usage_lines"]:  # type: ignore[union-attr]
@@ -222,7 +228,9 @@ def cmd_usage(args: argparse.Namespace) -> int:
 
 def cmd_interventions(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
-    cards = interventions.collect(cfg, conn, usage.snapshot(cfg), worker.live_slots(conn), train.manifest(conn, cfg, datetime.now()))
+    compiling = compile_queue.view(cfg.state, cfg.compile_slots) if cfg.compile_slots > 0 else None
+    cards = interventions.collect(cfg, conn, usage.snapshot(cfg), worker.live_slots(conn), train.manifest(conn, cfg, datetime.now()),
+                                  compiling)
     if args.json:
         print(json.dumps(cards, indent=2))
         return 0

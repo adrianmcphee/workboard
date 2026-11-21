@@ -34,6 +34,7 @@ Work out which of these applies, then read that section.
 | **Drain** | The fleet-wide pause (`workboard drain`): reviews and landing continue, no new authoring or audit job is handed out until `workboard resume`. |
 | **Lease** | A time-limited claim on a task, kept alive by a heartbeat. A lost lease returns the task to the queue. |
 | **Takeover** | A task whose last attempt ended without a result. The next author continues in the same worktree with notes. |
+| **Compile queue** | Optional `[compile]` slots that heavy build commands (agents', guards', landings', builds') wait for, through PATH shims. |
 | **Guard** | A fast check command (lint, focused tests) that must pass before review and again after rebase. |
 | **Landing** | Rebase onto main, run guards, fast-forward push under a short lock, retire the worktree. |
 | **Build / train** | A scheduled full build of main. Each records which slices it contains. A slice "rides" the first build whose cutoff it can make. |
@@ -135,6 +136,7 @@ workboard/            the package; the `workboard` command is workboard.cli:main
   harness.py          runs one agent CLI: own process group, heartbeat, deadline, quota detection
   prompt.py           renders the text each agent receives
   gitops.py           worktrees, guards, the landing lock, rebase and push
+  compile_queue.py    the compile queue: PATH shims, slot locks, the event log and its view; runs on its own as the shim
   usage.py            reads subscription allowance from local caches; burn rate, pace, claim verdict
   train.py            the build schedule: which build each slice is going for
   builds.py           runs builds, writes manifests, records sign-off verdicts
@@ -164,6 +166,7 @@ Keep all of these. A change that needs to break one needs the user's agreement f
 12. **Every audit job and finding change goes through `audits.py`,** inside one `store.write()` transaction, and leaves an event. Fix tasks are created with `tasks.insert` in the same transaction as their root cause.
 13. **A finding is fixed only by evidence and verified only by a later audit.** `fixed` needs a landed trailer on a commit that touches a regression path; `verified` needs a verify job in a later audit. Only a person turns a proposed `wont-fix` into a decision.
 14. **The audit checkout stays at its commit.** An agent's change to it is saved as a patch in the job's evidence and undone before the job is judged.
+15. **The compile queue only decides when a command starts.** The shim waits for a slot and then `exec`s the real tool with the same arguments, so process IDs, signals and exit codes are the tool's own. A logging failure never affects the build, and the release watcher holds neither the slot nor the build's pipes.
 
 ### Making a change
 

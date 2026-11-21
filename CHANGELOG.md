@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `[compile]`: an optional compile queue. Heavy invocations of the listed tools, from agents, guards, landings and builds, take one of a fixed number of OS-lock slots through PATH shims, line up first come first served, and log wait, hold and memory to `.workboard/compile/events.jsonl`. Status and the dashboard show the queue; an intervention flags long waits while memory is free.
 - `workboard drain` and `workboard resume`: a fleet-wide pause. Every claim path (authoring and audit jobs) honours it, while reviews and landing finish the work in flight. Status, the dashboard data and a card show it.
 - Audits: `workboard audit open` re-examines a build with claimable audit jobs (one per newly landed slice, one per checklist in `workboard/audits/`, verify jobs for fixes, and triage).
 - Findings get permanent IDs in one transaction; repeats become sightings. Triage groups them into root causes with exactly one fix task each.

@@ -51,6 +51,21 @@ trailer = "Fixes"             # a landed "Fixes: F-0001" on a commit touching a 
 policy = "enforce"            # enforce | advise | off
 reserve_pct = 3               # stop authoring on a subscription with this little left
 
+[compile]
+# Optional compile queue. With slots > 0, every agent, guard, landing and build gets a shim first on its
+# PATH for each tool below; a heavy invocation holds one of `slots` OS-lock slots for its whole life and
+# everything else passes straight through. Size slots from memory: about RAM / peak GiB per heavy build.
+slots = 0                     # 0: no queue
+alert_wait_min = 10           # flag waits this long while memory is free...
+alert_free_pct = 30           # ...with at least this share of memory available
+#
+# [compile.tools.cargo]
+# subcommands = ["build", "b", "test", "t", "check", "c", "clippy", "nextest", "run", "r", "bench", "rustc", "doc"]
+# value_options = ["-C", "--config", "-Z", "--color"]   # their values are never taken for the subcommand
+#
+# [compile.tools.cmake]
+# flags = ["--build"]         # heavy whenever one of these flags appears
+
 [dashboard]
 host = "127.0.0.1"
 port = 8787

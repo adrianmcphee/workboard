@@ -65,6 +65,10 @@ class Config:
     audit_refs_command: str = ""
     audit_regression_paths: list[str] = field(default_factory=lambda: list(DEFAULT_REGRESSION_PATHS))
     audit_trailer: str = "Fixes"
+    compile_slots: int = 0           # 0: no compile queue
+    compile_tools: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    compile_alert_wait_min: float = 10.0
+    compile_alert_free_pct: float = 30.0
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8787
     harnesses: dict[str, Harness] = field(default_factory=dict)
@@ -109,6 +113,26 @@ def _slot(value: str) -> tuple[int, int]:
     return slot
 
 
+COMPILE_RULE_KEYS = ("subcommands", "flags", "value_options")
+
+
+def _compile_tools(raw: object) -> dict[str, dict[str, list[str]]]:
+    """`[compile.tools.<tool>]` blocks: which invocations of each tool are heavy enough to queue."""
+    if not isinstance(raw, dict):
+        raise ConfigError("[compile] tools must be a table of [compile.tools.<tool>] blocks")
+    tools: dict[str, dict[str, list[str]]] = {}
+    for name, rule in raw.items():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", str(name)) or not isinstance(rule, dict):
+            raise ConfigError(f"[compile.tools.{name}] must be a tool name with a table of rules")
+        unknown = set(rule) - set(COMPILE_RULE_KEYS)
+        if unknown:
+            raise ConfigError(f"[compile.tools.{name}] has unknown key(s): {', '.join(sorted(unknown))}")
+        tools[str(name)] = {key: [str(v) for v in rule.get(key, [])] for key in COMPILE_RULE_KEYS}
+        if not tools[str(name)]["subcommands"] and not tools[str(name)]["flags"]:
+            raise ConfigError(f"[compile.tools.{name}] needs subcommands or flags, or nothing would be queued")
+    return tools
+
+
 def load(root: Path | None = None) -> Config:
     root = (root or find_root()).resolve()
     path = root / CONFIG_NAME
@@ -120,7 +144,7 @@ def load(root: Path | None = None) -> Config:
         raise ConfigError(f"{path}: {exc}") from exc
     project, limits = data.get("project", {}), data.get("limits", {})
     review, build, usage = data.get("review", {}), data.get("build", {}), data.get("usage", {})
-    dash, audit = data.get("dashboard", {}), data.get("audit", {})
+    dash, audit, compile_ = data.get("dashboard", {}), data.get("audit", {}), data.get("compile", {})
 
     def rel(value: str) -> Path:
         candidate = Path(os.path.expanduser(str(value)))
@@ -162,6 +186,10 @@ def load(root: Path | None = None) -> Config:
         audit_refs_command=str(audit.get("refs_command", "")),
         audit_regression_paths=[str(p) for p in audit.get("regression_paths", DEFAULT_REGRESSION_PATHS)],
         audit_trailer=str(audit.get("trailer", "Fixes")),
+        compile_slots=int(compile_.get("slots", 0)),
+        compile_tools=_compile_tools(compile_.get("tools", {})),
+        compile_alert_wait_min=float(compile_.get("alert_wait_min", 10)),
+        compile_alert_free_pct=float(compile_.get("alert_free_pct", 30)),
         dashboard_host=str(dash.get("host", "127.0.0.1")),
         dashboard_port=int(dash.get("port", 8787)),
     )
