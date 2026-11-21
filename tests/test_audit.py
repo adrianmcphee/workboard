@@ -160,6 +160,14 @@ class AuditClaims(AuditCase):
         audits.finish(self.conn, self.cfg, str(first["job_id"]), str(first["token"]), ok=False, reason="try again")
         self.assertEqual(audits.claim(self.conn, self.cfg, "beta", "w4", os.getpid())["reason"], "urgent_fix_first")
 
+    def test_a_drained_fleet_claims_no_audit_job_until_it_resumes(self) -> None:
+        self.checklist("tour", "Tour it.")
+        audits.open_audit(self.cfg, self.conn)
+        queue.set_draining(self.conn, True, "test")
+        self.assertEqual(audits.claim(self.conn, self.cfg, "beta", "w1", os.getpid()), {"claimed": False, "reason": "draining"})
+        queue.set_draining(self.conn, False, "test")
+        self.assertTrue(audits.claim(self.conn, self.cfg, "beta", "w1", os.getpid())["claimed"])
+
     def test_slice_jobs_prefer_a_harness_other_than_the_author(self) -> None:
         self.cfg.audit_per_slice = True
         self.checklist("tour", "Tour it.")

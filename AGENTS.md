@@ -31,6 +31,7 @@ Work out which of these applies, then read that section.
 | **Harness** | One configured agent CLI, usually one per subscription, in a `[harness.<name>]` block. |
 | **Slot** | One worker process for a harness. `slots = 2` runs two agents of that harness at once. |
 | **Task / slice** | One outcome, defined by a Markdown file in `workboard/tasks/`. A slice is a task once it is on its way to a build. |
+| **Drain** | The fleet-wide pause (`workboard drain`): reviews and landing continue, no new authoring or audit job is handed out until `workboard resume`. |
 | **Lease** | A time-limited claim on a task, kept alive by a heartbeat. A lost lease returns the task to the queue. |
 | **Takeover** | A task whose last attempt ended without a result. The next author continues in the same worktree with notes. |
 | **Guard** | A fast check command (lint, focused tests) that must pass before review and again after rebase. |

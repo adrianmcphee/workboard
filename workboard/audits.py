@@ -320,6 +320,8 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
             return {"claimed": False, "reason": "harness_cooldown"}
         if usage_verdict and not usage_verdict.get("allow", True) and not job_id:
             return {"claimed": False, "reason": "usage"}
+        if queue.draining(conn) and not job_id:
+            return {"claimed": False, "reason": "draining"}
         if not job_id:
             urgent = conn.execute("SELECT task_id FROM tasks WHERE status IN ('READY','NEEDS_TAKEOVER') AND priority>=? LIMIT 1",
                                   (SEVERITY_PRIORITY["P0"],)).fetchone()

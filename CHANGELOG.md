@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `workboard drain` and `workboard resume`: a fleet-wide pause. Every claim path (authoring and audit jobs) honours it, while reviews and landing finish the work in flight. Status, the dashboard data and a card show it.
 - Audits: `workboard audit open` re-examines a build with claimable audit jobs (one per newly landed slice, one per checklist in `workboard/audits/`, verify jobs for fixes, and triage).
 - Findings get permanent IDs in one transaction; repeats become sightings. Triage groups them into root causes with exactly one fix task each.
 - A landed `Fixes: F-NNNN` trailer on a commit that touches a regression test path marks a finding fixed; only a later audit verifies it, and a reopen queues the next fix.

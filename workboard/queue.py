@@ -34,6 +34,23 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+DRAIN_KEY = "fleet_draining"
+
+
+def draining(conn: sqlite3.Connection) -> bool:
+    """True while the whole fleet is draining: no new authoring or audit jobs, reviews and landing continue."""
+    return bool(store.get_meta(conn, DRAIN_KEY))
+
+
+def set_draining(conn: sqlite3.Connection, on: bool, actor: str) -> None:
+    with store.write(conn):
+        if on:
+            store.set_meta(conn, DRAIN_KEY, str(int(time.time())))
+        else:
+            conn.execute("DELETE FROM meta WHERE key=?", (DRAIN_KEY,))
+        store.event(conn, actor, "fleet_drain" if on else "fleet_resume")
+
+
 def paths_overlap(left: list[str], right: list[str]) -> bool:
     for a in left:
         for b in right:
@@ -110,6 +127,8 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
     """Hand one unit of work to a worker: a review first, then a takeover, then fresh work.
 
     With `review_only`, stop after the review step, so the worker can offer audit work next.
+    While the fleet is draining, reviews are still handed out so in-flight work lands, but no authoring is,
+    unless a person names the task.
     """
     now = now or time.time()
     with store.write(conn):
@@ -139,6 +158,8 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
                 return _lease(conn, cfg, pick, "REVIEWING", "review", harness, worker, pid, cfg.review_lease_min, now)
         if review_only:
             return {"claimed": False, "reason": "no_review_work"}
+        if draining(conn) and not task_id:
+            return {"claimed": False, "reason": "draining"}
 
         coding = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='CLAIMED'").fetchone()[0]
         if coding >= cfg.max_coding:

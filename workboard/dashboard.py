@@ -61,7 +61,7 @@ def snapshot(cfg: Config) -> dict[str, object]:
             "load": round(os.getloadavg()[0], 1), "cores": os.cpu_count(),
             "usage": snap, "usage_lines": usage.lines(snap), "train": manifest, "builds": builds.summary(cfg),
             "interventions": interventions.collect(cfg, conn, snap, slots, manifest), "events": events,
-            "audits": audits.overview(conn),
+            "audits": audits.overview(conn), "draining": queue.draining(conn),
         }
     finally:
         conn.close()

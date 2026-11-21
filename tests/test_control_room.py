@@ -171,6 +171,27 @@ class Interventions(ProjectCase):
         self.assertEqual(kinds["critical_path"]["ops"][0]["args"], {"task": "root", "priority": 500})
 
 
+class Drain(ProjectCase):
+    def test_drain_shows_in_status_and_as_a_card_until_resume(self) -> None:
+        import contextlib, io
+        from workboard import cli
+        self.task("one")
+        self.sync()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--root", str(self.repo), "drain"]), 0)
+            self.assertEqual(cli.main(["--root", str(self.repo), "status"]), 0)
+        self.assertIn("fleet: draining", out.getvalue())
+        snap = dashboard.snapshot(self.cfg)
+        self.assertTrue(snap["draining"])
+        self.assertIn("draining", [c["kind"] for c in snap["interventions"]])  # type: ignore[union-attr]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["--root", str(self.repo), "resume"]), 0)
+        snap = dashboard.snapshot(self.cfg)
+        self.assertFalse(snap["draining"])
+        self.assertNotIn("draining", [c["kind"] for c in snap["interventions"]])  # type: ignore[union-attr]
+
+
 class Dashboard(ProjectCase):
     def post(self, port: int, body: dict[str, object], headers: dict[str, str]) -> tuple[int, dict[str, object]]:
         request = urllib.request.Request(f"http://127.0.0.1:{port}/api/act", data=json.dumps(body).encode(),

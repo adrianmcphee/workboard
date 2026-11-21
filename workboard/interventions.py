@@ -133,11 +133,22 @@ def audit_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
     return cards
 
 
+def fleet_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    from . import queue
+    if not queue.draining(conn):
+        return []
+    marks = ",".join("?" * len(store.IN_FLIGHT))
+    flying = conn.execute(f"SELECT COUNT(*) FROM tasks WHERE status IN ({marks})", store.IN_FLIGHT).fetchone()[0]
+    return [card("HIGH", "draining", "The fleet is draining",
+                 f"No new authoring or audit jobs are handed out; {flying} task(s) are still in flight. "
+                 "Reviews and landing continue.", "workboard resume")]
+
+
 def collect(cfg: Config, conn: sqlite3.Connection, snap: dict[str, object], slots: dict[str, int],
             manifest: dict[str, object]) -> list[dict[str, object]]:
     cards: list[dict[str, object]] = []
     for source in (lambda: usage_cards(cfg, snap, slots), lambda: task_cards(conn), lambda: train_cards(manifest),
-                   lambda: audit_cards(conn)):
+                   lambda: audit_cards(conn), lambda: fleet_cards(conn)):
         try:
             cards.extend(source())
         except Exception as exc:  # one broken source must not hide the others

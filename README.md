@@ -423,6 +423,7 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 | `workboard cancel <task>` | Stop a task |
 | `workboard up [--harness h] [--slots n]` | Start workers or change how many run |
 | `workboard down [--harness h] [--now]` | Stop workers after their current task, or immediately |
+| `workboard drain` / `workboard resume` | Stop handing out new authoring and audit jobs on every harness while reviews and landing finish the work in flight, and undo it |
 | `workboard worker --harness h [--once]` | Run one worker in the foreground |
 | `workboard land` | Land every reviewed task that is waiting |
 | `workboard build` | Build the head of main and record its manifest |
@@ -442,6 +443,8 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 | `workboard dashboard` | Serve the control room page |
 
 Lowering `--slots` never kills an agent: the extra workers finish their current task and exit. `workboard down --now` stops agents mid-task, and their tasks continue later as takeovers.
+
+`workboard drain` is the fleet-wide pause, for example before moving to another machine. Workers keep running, but take only reviews, so every slice already authored still gets reviewed and landed. No new authoring, takeover or audit job is handed out until `workboard resume`, except a task a person claims by name. Status and the dashboard show the drain until it is lifted.
 
 ## Where state lives
 

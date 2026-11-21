@@ -97,6 +97,23 @@ class ClaimRules(ProjectCase):
         self.assertEqual(self.claim("alpha")["reason"], "board_complete")
 
 
+    def test_a_drained_fleet_takes_no_new_authoring_but_still_reviews_and_resume_undoes_it(self) -> None:
+        self.task("flying")
+        self.task("waiting")
+        self.sync()
+        self.to_review("flying")
+        queue.set_draining(self.conn, True, "test")
+        self.assertTrue(queue.draining(self.conn))
+        got = self.claim("beta")
+        self.assertEqual((got["role"], got["task_id"]), ("review", "flying"))  # in-flight work still finishes
+        self.assertEqual(self.claim("alpha")["reason"], "draining")
+        self.assertEqual(self.claim("alpha", task_id="waiting")["task_id"], "waiting")  # a person's explicit claim
+        queue.set_draining(self.conn, False, "test")
+        self.assertFalse(queue.draining(self.conn))
+        kinds = [r[0] for r in self.conn.execute("SELECT kind FROM events WHERE kind LIKE 'fleet_%' ORDER BY id")]
+        self.assertEqual(kinds, ["fleet_drain", "fleet_resume"])
+
+
 class Leases(ProjectCase):
     def test_lost_heartbeat_dead_worker_and_deadline_all_release_the_task(self) -> None:
         for name in ("beat", "dead", "late"):

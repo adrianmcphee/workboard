@@ -49,6 +49,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     counts = snap["counts"]
     print(f"{snap['project']}  {snap['generated_at']}  load {snap['load']}/{snap['cores']}  {snap['free_gib']} GiB free")
     print("  " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())) if counts else "  no tasks")  # type: ignore[union-attr]
+    if snap.get("draining"):
+        print("  fleet: draining (no new authoring or audit jobs); `workboard resume` undoes it")
     for line in snap["usage_lines"]:  # type: ignore[union-attr]
         print(f"  usage: {line}")
     for build in snap["train"]["builds"][:2]:  # type: ignore[index]
@@ -139,6 +141,29 @@ def cmd_down(args: argparse.Namespace) -> int:
     for name in ([args.harness] if args.harness else list(cfg.harnesses)):
         control.set_slots(cfg, conn, name, 0)
         print(f"{name}: draining; workers stop after their current task")
+    return 0
+
+
+def in_flight(conn) -> dict[str, int]:
+    marks = ",".join("?" * len(store.IN_FLIGHT))
+    return {r[0]: r[1] for r in conn.execute(f"SELECT status, COUNT(*) FROM tasks WHERE status IN ({marks}) GROUP BY status",
+                                             store.IN_FLIGHT)}
+
+
+def cmd_drain(args: argparse.Namespace) -> int:
+    _, conn = _open(args)
+    queue.set_draining(conn, True, "cli")
+    flying = in_flight(conn)
+    print("draining: workers take no new authoring or audit jobs; reviews and landing continue.")
+    print("in flight: " + ("  ".join(f"{k}={v}" for k, v in sorted(flying.items())) or "nothing"))
+    print("Watch `workboard status`; undo with `workboard resume`.")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    _, conn = _open(args)
+    queue.set_draining(conn, False, "cli")
+    print("resumed: workers claim new work again")
     return 0
 
 
@@ -357,6 +382,8 @@ def parser() -> argparse.ArgumentParser:
     p = add("down", cmd_down, "stop workers after their current task (--now stops them immediately)")
     p.add_argument("--harness")
     p.add_argument("--now", action="store_true")
+    add("drain", cmd_drain, "stop new authoring and audit jobs on every harness; in-flight work still lands")
+    add("resume", cmd_resume, "undo `workboard drain`")
     p = add("worker", cmd_worker, "run one worker in the foreground")
     p.add_argument("--harness", required=True)
     p.add_argument("--slot", type=int, default=1)
