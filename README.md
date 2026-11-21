@@ -77,7 +77,7 @@ Each subscription caps usage, though, which is why heavy users stack several. Do
 
 ## The Workboard delivery cycle
 
-Every task goes through the same six stages. Each stage has one gate that decides whether the work moves on, and it is always clear whether an agent, Workboard or a person makes that call.
+Every task goes through the same seven stages. Each stage has one gate that decides whether the work moves on, and it is always clear whether an agent, Workboard or a person makes that call.
 
 ```
  workboard/tasks/*.md
@@ -100,7 +100,7 @@ Every task goes through the same six stages. Each stage has one gate that decide
 | Stage | What happens | Gate to move on | Decided by |
 |---|---|---|---|
 | **1. Plan** | A task file states one outcome, how to tell it is done, the paths it expects to touch and what it depends on. | Every dependency is done. | A person writes the task; an agent may draft it. |
-| **2. Author** | A worker claims the task under a lease. An agent works in the task's own worktree and commits to the task branch. | Evidence: the worktree is clean, the branch has commits, history is linear, every guard passes. | The authoring agent, checked by Workboard. |
+| **2. Author** | A worker claims the task under a lease. An agent works in the task's own worktree and commits to the task branch. | Evidence: the worktree is clean, the branch has commits (and is not a commit review already rejected), history is linear, every guard passes. | The authoring agent, checked by Workboard. |
 | **3. Review** | An agent from a different harness reads the branch against the brief and writes a verdict. | A pass, or a fail with defects that point at lines. | The reviewing agent. |
 | **4. Land** | The branch is rebased onto main, guarded again, and pushed as a fast-forward under a short lock. Its worktree is retired. | The guards pass on the rebased commit and main has not moved. | Workboard. |
 | **5. Build** | At fixed times the head of main is built in full, and the build records which slices it contains. | The build command passes. | Workboard, on a schedule. |
@@ -290,9 +290,9 @@ BLOCKED -> READY -> CLAIMED -> AWAITING_REVIEW -> REVIEWING -> LANDING -> DONE
                                 NEEDS_TRIAGE
 ```
 
-- **NEEDS_TAKEOVER:** an attempt ended without a result, a review rejected the branch, or landing hit a conflict. The worktree and a notes file are kept, and the next author continues from them. A harness that just failed a task is the last choice to take it again.
+- **NEEDS_TAKEOVER:** an attempt ended without a result, a review rejected the branch, or landing hit a conflict. The worktree and a notes file are kept, and the next author continues from them. A harness that just failed a task is the last choice to take it again, and the exact commit SHA a reviewer rejected cannot return to review unchanged.
 - **NEEDS_TRIAGE:** the attempt limit was reached. Workers stop claiming the task until a human runs `workboard requeue`.
-- **A quota stop is not an attempt.** When an agent's output matches a `quota_patterns` entry, that harness cools down and the task returns to the queue without spending an attempt.
+- **A quota stop or a directive abort is not an attempt.** When an agent's output matches a `quota_patterns` entry, that harness cools down and the task returns to the queue without spending an attempt. Ending a lease with `workboard directive set --mode abort_leases` also preserves its attempt count.
 - **A reviewer that writes no verdict has not rejected anything.** The review is offered to another harness.
 - **Authors build and test only what their task touches,** one heavy command at a time, and end their notes with a `## Commands run` section. Reviewers judge the tests from that record and the guards, and never fail a branch for how it was built. A command the brief names for its acceptance runs once, near the end.
 
@@ -427,9 +427,9 @@ Set `[usage] policy = "advise"` to keep the display and drop the refusals.
 
 ![The Workboard web console after a build: sign-off verdicts, a rejected slice turned into a fix task, and the event log](docs/images/dashboard.png)
 
-The dashboard lists **potential interventions**: decisions that need a human, each with the command that takes it and usually a button. Examples are a subscription that will run dry, a task parked for triage, a task on its fourth attempt, work blocked behind a cancelled dependency, and critical-path work nobody has claimed.
+The dashboard lists **potential interventions**: decisions that need a human, each with the command that takes it and usually a button. Examples are a subscription that will run dry, a task or audit job parked for triage, a proposed `wont-fix` finding, repeated landing failures with nothing landing since, compile slots waiting while memory sits free, an active fleet drain or operator directive, a task on its fourth attempt, work blocked behind a cancelled dependency, and critical-path work nobody has claimed.
 
-Other controls on the page: change the number of workers per harness, cancel or requeue a task, and accept or reject each slice of the latest build.
+Other controls on the page: change the number of workers per harness, cancel or requeue a task, clear an active directive, and accept or reject each slice of the latest build.
 
 The dashboard binds to `127.0.0.1`. Every write needs a token that only the served page carries, sent in a custom header, plus a loopback `Host` header, so another site open in your browser cannot trigger an action. Do not expose the port beyond the machine.
 
@@ -485,7 +485,7 @@ workboard directive list
 workboard directive clear --all
 ```
 
-`instruction` adds your note to matching prompts and prints it once on stderr at the next compile boundary. `pause_claims` holds matching claims. `wrap_up` holds claims and refuses new heavy compiles with your message on stderr so mid-turn agents wrap up cleanly. `cancel_builds` sends `SIGTERM` to matching tracked compiles and refuses new ones while active. `abort_leases` ends matching active leases at the next heartbeat without spending an attempt.
+`instruction` adds your note to matching prompts and prints it once on stderr at the next compile boundary. `pause_claims` holds matching claims. `wrap_up` holds claims and refuses new heavy compiles with your message on stderr so mid-turn agents wrap up cleanly (add `--kill-builds` to stop running compiles too). `cancel_builds` sends `SIGTERM` to matching tracked compiles and refuses new ones while active. `abort_leases` ends matching active leases at the next heartbeat without spending an attempt. Every mode can be narrowed with `--harness <name>`, `--role author|review|audit|interactive`, `--task <id-or-glob>` and `--ttl-min <minutes>`.
 
 ## Where state lives
 
@@ -493,11 +493,11 @@ workboard directive clear --all
 |---|---|
 | `workboard.toml` | Configuration, committed with the project |
 | `workboard/tasks/*.md` | Task definitions, committed with the project |
-| `.workboard/workboard.db` | Queue, attempts, events and worker registry |
+| `.workboard/workboard.db` | Queue, attempts, events, audits, directives and worker registry |
 | `.workboard/handoffs/<task>/` | Rendered prompts, takeover notes, review verdict |
 | `.workboard/logs/` | Agent, landing, build and worker output |
 | `.workboard/builds/` | Build records and sign-off verdicts |
-| `.workboard/compile/` | Compile queue slot locks, shims and `events.jsonl` |
+| `.workboard/compile/` | Compile queue slot locks, shims, `events.jsonl`, `affinity.json` and optional `worktrees/slot-<n>` warm checkouts |
 | `workboard/audits/*.md` | Audit checklists, committed with the project |
 | `.workboard/audits/<audit>/` | Per job: brief, prompts, evidence, result; per audit: `report.md`, `summary.json`, `findings.jsonl` |
 | `.worktrees/_audit-<audit>/` | The read-only checkout of the audited commit |
@@ -514,7 +514,7 @@ Everything a new machine needs to run the project should be in git. What git can
 3. **Check and archive:** `workboard move-check`. It exits 0 only when nothing unique remains: no local ref with commits that have no equivalent patch on main (a branch already landed by cherry-pick or rebase is shown but not counted), no stash, no worktree with uncommitted files, no task in flight. Run `workboard move-archive --apply` to snapshot dirty worktrees onto `refs/recovery/<date>/worktrees/<name>` without touching their index, push every unique ref and stash to `refs/archive/<date>/` on the remote without forcing, and confirm every pushed commit on the remote.
 4. **Stop the workers:** `workboard down`, then wait for them to exit.
 5. **Copy the state** it lists (`.workboard/workboard.db` keeps task history, attempts, builds, sign-off and audit findings; `handoffs/`, `builds/` and `audits/` keep their evidence; `logs/` is optional) to the same place under the new clone.
-6. **On the new machine:** clone, install the project's toolchain and the agent CLIs, sign each CLI in, copy the state, then `workboard sync`, `workboard resume` and `workboard up`.
+6. **On the new machine:** clone, install the project's toolchain and the agent CLIs, sign each CLI in, copy the state, restore any archived task branches with `git fetch origin 'refs/archive/<date>/heads/*:refs/heads/*'`, then `workboard sync`, `workboard resume` and `workboard up`.
 
 [docs/multi-machine.md](docs/multi-machine.md) is the separate design for running workers on several machines at once.
 

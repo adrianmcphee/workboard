@@ -9,8 +9,8 @@ Workboard runs coding agents from several subscriptions (Claude Code, Codex and 
 - It hands tasks to agent CLIs under time-limited leases, each in its own git worktree.
 - An agent from a different harness reviews each result.
 - Approved work is rebased, checked and pushed to the main branch in small linear commits.
-- Builds run on a schedule, and a person accepts or rejects each slice.
-- It reads each subscription's remaining allowance and paces work across them.
+- Builds run on a schedule, a person accepts or rejects each slice, and audits re-examine builds so defects become verified fixes.
+- It reads each subscription's remaining allowance and paces work across them, queues heavy compiles so the machine does not thrash, and carries live operator directives to running workers and shims.
 
 It is a Python 3.11+ command-line tool, `workboard`, with no dependencies outside the standard library. It runs on macOS and Linux, on one machine.
 
@@ -35,7 +35,7 @@ Work out which of these applies, then read that section.
 | **Directive** | A live operator instruction or control action (`workboard directive set`): scoped guidance, claim hold, wrap-up, build cancellation or lease abort. |
 | **Lease** | A time-limited claim on a task, kept alive by a heartbeat. A lost lease returns the task to the queue. |
 | **Takeover** | A task whose last attempt ended without a result. The next author continues in the same worktree with notes. |
-| **Compile queue** | Optional `[compile]` slots that heavy build commands (agents', guards', landings', builds') wait for, through PATH shims. |
+| **Compile queue** | Optional `[compile]` slots that heavy build commands (agents', guards', landings', builds') wait for, through PATH shims, with optional `warm = true` per-slot checkouts. |
 | **Guard** | A fast check command (lint, focused tests) that must pass before review and again after rebase. |
 | **Landing** | Rebase onto main, run guards, fast-forward push under a short lock, retire the worktree. |
 | **Build / train** | A scheduled full build of main. Each records which slices it contains. A slice "rides" the first build whose cutoff it can make. |
@@ -50,14 +50,14 @@ Work out which of these applies, then read that section.
 ## The delivery cycle
 
 1. **Plan:** a task file states one outcome. It becomes `READY` once its dependencies are `DONE`.
-2. **Author:** a worker claims it (`CLAIMED`) and runs the agent in `.worktrees/<task>/` on branch `workboard/<task>`. The attempt counts only if the worktree is clean, the branch has commits, history is linear and every guard passes (`AWAITING_REVIEW`).
+2. **Author:** a worker claims it (`CLAIMED`) and runs the agent in `.worktrees/<task>/` on branch `workboard/<task>`. The attempt reaches review only if the worktree is clean, the branch has commits (and is not the exact commit a reviewer already rejected), history is linear and every guard passes (`AWAITING_REVIEW`).
 3. **Review:** an agent from another harness reads the branch and writes `{"passed": true|false, ...}` to the task's verdict file (`REVIEWING`).
 4. **Land:** rebase, guard, locked fast-forward push (`LANDING`, then `DONE`).
 5. **Build:** `workboard build` at the scheduled times records a manifest.
 6. **Sign-off:** a person runs `workboard signoff accept|reject <task>`.
 7. **Audit:** `workboard audit open` creates audit jobs for a build; findings become root causes with one fix task each, and a later audit verifies each fix.
 
-Failures (quota stop, crash, timeout, failed review, landing conflict) send the task to `NEEDS_TAKEOVER`. After `max_attempts` it goes to `NEEDS_TRIAGE` and waits for a person.
+Failures (quota stop, directive abort, crash, timeout, failed review, landing conflict) send the task to `NEEDS_TAKEOVER`; quota stops and `abort_leases` directives do not spend an attempt. After `max_attempts` failed attempts it goes to `NEEDS_TRIAGE` and waits for a person.
 
 ## Using Workboard on a project
 
@@ -76,6 +76,8 @@ Then edit `workboard.toml`:
 2. **One `[harness.<name>]` block per agent CLI or subscription.** Uncomment the Claude Code and Codex examples or add your own. Each needs `command`, `prompt` (`stdin`, `arg` or `file`), `slots`, `usage` (`claude-code`, `codex`, `command` or `none`) and `quota_patterns`. Configure at least two harnesses from different vendors if you can; cross-review depends on it.
 3. **`[project] rules`:** the target project's own `AGENTS.md` or equivalent, so every agent gets the project's rules.
 4. **`[build]`:** `schedule` (for example `["12:30", "20:30"]`) and `command`. Then add `workboard build` to cron or launchd at those times.
+5. **Optional `[compile]`:** set `slots` (about RAM divided by peak GiB per heavy build) and `[compile.tools.<tool>]` rules (`subcommands`, `flags`, `value_options`, and `warm = true` when task worktrees benefit from sharing one warm incremental checkout per slot).
+6. **Optional `[audit]`:** add checklists under `workboard/audits/*.md` and configure `prepare`, `refs_command`, `regression_paths` and `trailer` if they differ from the defaults.
 
 ### Write tasks
 
@@ -111,14 +113,20 @@ workboard up            # start the configured workers in the background
 workboard dashboard     # control room at http://127.0.0.1:8787
 ```
 
-To check that it is working: `workboard board` lists every task, `workboard show <task>` shows one task's history, `workboard events` prints the event log, and logs are in `.workboard/logs/`.
+To check and steer a running fleet:
+
+- `workboard board` lists every task, `workboard show <task>` shows one task's history, `workboard events` prints the event log, and logs are in `.workboard/logs/`.
+- `workboard drain` pauses new authoring and audit claims while reviews and landing finish in-flight work; `workboard resume` lifts it.
+- `workboard directive set --mode instruction|pause_claims|wrap_up|cancel_builds|abort_leases --message "..."` (with optional `--harness`, `--role author|review|audit|interactive`, `--task <glob>`, `--ttl-min <n>`, `--kill-builds`) sends live instructions, pauses scoped claims, wraps up mid-turn work, stops tracked compiles, or aborts matching leases without spending attempts (`workboard directive list`, `workboard directive clear <id>|--all`).
+- `workboard audit open|status|jobs|findings|show|decide|requeue|reconcile|report` runs build audits and tracks findings (`F-NNNN`) through root causes (`RC-NNNN`) to verified fixes.
+- `workboard move-check` reports everything unique to this host before moving machines, and `workboard move-archive --apply` snapshots dirty worktrees on a scratch index, pushes unique refs and stashes to `refs/archive/<date>/`, and confirms them on the remote.
 
 ### Rules when operating Workboard
 
 - Change state only through `workboard` commands. Never edit `.workboard/workboard.db`, and never move a task by hand.
 - Never delete a worktree under `.worktrees/` yourself, and never push to main outside Workboard's landing.
-- Never stop agents by process name (`pkill`, `killall`). Use `workboard down`, or `workboard down --now`.
-- Decisions listed by `workboard interventions` belong to a person unless they told you to take them.
+- Never stop agents or compiles by process name (`pkill`, `killall`). Use `workboard down` (or `workboard down --now`) for workers, and `workboard directive set --mode cancel_builds --message "..."` for tracked compiles.
+- Decisions listed by `workboard interventions` (including `workboard audit decide` on proposed `wont-fix` findings) belong to a person unless they told you to take them.
 - Harness commands run agents unattended with full permissions in their worktree. Do not configure them on a machine or account that holds anything an agent should not touch, and say so if you are asked to.
 
 ## Working on Workboard
@@ -156,26 +164,26 @@ docs/                 operating-model.md (the git rules), multi-machine.md (desi
 Keep all of these. A change that needs to break one needs the user's agreement first.
 
 1. **Standard library only.** No third-party dependency, including for tests. Python 3.11 or newer.
-2. **Every task status change goes through `queue.py`,** inside one `store.write()` transaction, and records exactly one event with its actor. The only other writer is `tasks.py`, which inserts new tasks as `BLOCKED` and refreshes task definitions without touching progress.
-3. **Task text is data.** Briefs and titles are passed to agents as text. Never `eval` them, never format them twice, never build a shell command from them.
-4. **Processes are stopped by their own process group** (`os.killpg` on the group the harness started). Never by name or pattern.
+2. **Every task status change goes through `queue.py`,** inside one `store.write()` transaction, and records exactly one event with its actor. `tasks.py` inserts new tasks as `BLOCKED` and refreshes task definitions without touching progress; `audits.py` owns audit jobs and findings; `directives.py` owns operator directives and tracked builds (each inside `store.write()` with an event).
+3. **Task and directive text is data.** Briefs, titles and directive messages are passed as text. Never `eval` them, never format them twice, never build a shell command from them.
+4. **Processes are stopped by identity** (`os.killpg` on the group the harness started, or the exact PID `compile_queue` recorded in `active_builds`). Never by name or pattern.
 5. **The landing lock covers only fetch, check and push.** Guards and rebases run outside it.
-6. **A worktree with uncommitted changes is never removed automatically.**
+6. **A worktree with uncommitted changes is never removed automatically,** and `move-archive` or `warm` compile snapshots read it through a temporary `GIT_INDEX_FILE` so its working tree, index and stash are untouched.
 7. **Usage readers only read local files or the configured command.** They never call a provider, never read a credential, and never raise into a caller. Unknown or stale usage means "no opinion".
 8. **Workboard never lowers total throughput on its own,** except stopping a harness at its reserve. Trade-offs become interventions.
-9. **A quota stop is not an attempt.** It cools the harness down and requeues the task without using an attempt.
+9. **A quota stop or `abort_leases` directive is not an attempt.** Quota cools the harness down; both return the task or audit job without spending an attempt. An exact commit SHA a reviewer rejected (`review_rejections`) cannot return to review unchanged.
 10. **The dashboard binds to loopback.** Every write needs the page token in its custom header and a loopback `Host`. Only the operations listed in `control.py` exist.
 11. **A reviewer that writes no verdict has not rejected anything.** The review is offered to another harness.
 12. **Every audit job and finding change goes through `audits.py`,** inside one `store.write()` transaction, and leaves an event. Fix tasks are created with `tasks.insert` in the same transaction as their root cause.
 13. **A finding is fixed only by evidence and verified only by a later audit.** `fixed` needs a landed trailer on a commit that touches a regression path; `verified` needs a verify job in a later audit. Only a person turns a proposed `wont-fix` into a decision.
 14. **The audit checkout stays at its commit.** An agent's change to it is saved as a patch in the job's evidence and undone before the job is judged.
-15. **The compile queue only decides when a command starts.** The shim waits for a slot and then `exec`s the real tool with the same arguments, so process IDs, signals and exit codes are the tool's own. A logging failure never affects the build, and the release watcher holds neither the slot nor the build's pipes.
+15. **The compile queue only decides when and where a command starts.** The shim checks active directives, waits for a slot (optionally checking out a scratch-index snapshot in the slot's warm directory when `warm = true`), and `exec`s the real tool with the same arguments, so process IDs, signals and exit codes are the tool's own. A logging or database read failure never affects a normal build, and the release watcher holds neither the slot nor the build's pipes.
 
 ### Making a change
 
 1. Read the module that owns the behaviour (see the layout) and its tests.
-2. Write or change a test first. `tests/test_flow.py` drives the real worker loop end to end, `tests/test_queue.py` covers the state machine, and `tests/test_control_room.py` covers usage, prompts, builds, interventions and the dashboard, and `tests/test_audit.py` covers audits end to end. `tests/fake_agent.py` stands in for an agent CLI: it reads the `<!-- workboard role=... -->` header of its prompt and acts on it.
-3. Run the suite: `python3 -m unittest discover -s tests -t .` It needs git and no network, and takes about 30 seconds.
+2. Write or change a test first. `tests/test_flow.py` drives the real worker loop end to end, `tests/test_queue.py` covers the state machine, `tests/test_control_room.py` covers usage, prompts, builds, interventions and the dashboard, `tests/test_audit.py` covers audits, `tests/test_compile_queue.py` covers compile slots and warm checkouts, `tests/test_directives.py` covers live directives, build cancellation and review guards, and `tests/test_move_check.py` covers `move-check` and `move-archive`. `tests/fake_agent.py` stands in for an agent CLI: it reads the `<!-- workboard role=... -->` header of its prompt and acts on it.
+3. Run the suite: `python3 -m unittest discover -s tests -t .` It needs git and no network.
 4. When behaviour or configuration changes, update in the same change: [README.md](README.md), `template.py` for any `workboard.toml` key, this file if a rule or the layout changes, and [CHANGELOG.md](CHANGELOG.md).
 
 ### Style

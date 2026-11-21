@@ -62,7 +62,7 @@ A device, a signing identity, an installed application or a benchmark that needs
 
 ### 10. Processes are stopped by identity, never by name
 
-A worker stops the agent it started through that agent's own process group. Nothing is killed by matching a command name.
+A worker stops the agent it started through that agent's own process group, and `cancel_builds` directives stop only the exact compile PIDs recorded by Workboard's compile shim. Nothing is killed by matching a command name.
 
 *Why:* a pattern kill takes out every sibling agent running the same tool.
 
@@ -80,9 +80,10 @@ Builds happen at fixed times. A slice is told which build it is going for and wh
 
 The fleet handles claiming, retrying, reviewing and landing on its own. It leaves these to a person:
 
-- Whether a slice in a build is acceptable.
+- Whether a slice in a build is acceptable, or whether a proposed `wont-fix` audit finding should be accepted or reopened.
 - Whether to spend a subscription fast or make it last until its reset.
-- What to do with a task that has used all its attempts.
+- When to drain the fleet, pause claims, wrap up in-flight turns or cancel running compiles (`workboard drain`, `workboard directive`).
+- What to do with a task or audit job that has used all its attempts.
 - Whether a brief that keeps failing should be rewritten, split or dropped.
 
 ## Recovering an interrupted task
