@@ -142,6 +142,7 @@ workboard/            the package; the `workboard` command is workboard.cli:main
   builds.py           runs builds, writes manifests, records sign-off verdicts
   audits.py           audits of a build: audit jobs and their leases, findings, triage, fix reconciliation, reports
   interventions.py    the decisions shown to a person, with the command that takes each
+  movecheck.py        `workboard move-check`: what would be lost moving the project to another machine (read-only)
   control.py          starts, resizes and stops workers; the closed list of dashboard operations
   dashboard.py        the local control-room page and its HTTP handler
 tests/                unittest suite: real git repositories and a fake agent CLI

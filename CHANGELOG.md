@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `workboard move-check`: a read-only report of everything that would be lost moving the project to another machine (refs and stashes on no remote, with landed-by-patch branches told apart from unique work, dirty worktrees, tasks in flight, and the state to copy), exiting 1 when anything unique would be. The README describes the move: drain, wait, check, stop, copy, clone.
 - Prompts state the build rules once and the same way for author and reviewer: build and test only what the task touches, one heavy command at a time, acceptance commands from the brief once near the end, and a `## Commands run` record that the reviewer judges with the guards. How the author built is never a reason to fail.
 - `[compile]`: an optional compile queue. Heavy invocations of the listed tools, from agents, guards, landings and builds, take one of a fixed number of OS-lock slots through PATH shims, line up first come first served, and log wait, hold and memory to `.workboard/compile/events.jsonl`. Status and the dashboard show the queue; an intervention flags long waits while memory is free.
 - `workboard drain` and `workboard resume`: a fleet-wide pause. Every claim path (authoring and audit jobs) honours it, while reviews and landing finish the work in flight. Status, the dashboard data and a card show it.

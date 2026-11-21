@@ -141,7 +141,7 @@ def fleet_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
     flying = conn.execute(f"SELECT COUNT(*) FROM tasks WHERE status IN ({marks})", store.IN_FLIGHT).fetchone()[0]
     return [card("HIGH", "draining", "The fleet is draining",
                  f"No new authoring or audit jobs are handed out; {flying} task(s) are still in flight. "
-                 "Reviews and landing continue.", "workboard resume")]
+                 "Reviews and landing continue.", "workboard resume   (or, before moving machines: workboard move-check)")]
 
 
 def compile_cards(cfg: Config, view: dict[str, object] | None) -> list[dict[str, object]]:

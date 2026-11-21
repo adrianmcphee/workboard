@@ -2,6 +2,8 @@
 
 Workboard runs every worker for a project on one host. This document is the design for spreading workers across several hosts while keeping one queue, one integrator and one control room.
 
+Moving a project from one host to another is a different, supported operation: see "Moving to another machine" in the [README](../README.md) and `workboard move-check`.
+
 ## Why
 
 - **Compute.** Agents that build and test saturate one machine long before the queue runs out of work.

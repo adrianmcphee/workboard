@@ -447,6 +447,7 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 | `workboard up [--harness h] [--slots n]` | Start workers or change how many run |
 | `workboard down [--harness h] [--now]` | Stop workers after their current task, or immediately |
 | `workboard drain` / `workboard resume` | Stop handing out new authoring and audit jobs on every harness while reviews and landing finish the work in flight, and undo it |
+| `workboard move-check [--json]` | Everything that would be lost moving the project to another machine; exits 1 if anything unique would be |
 | `workboard worker --harness h [--once]` | Run one worker in the foreground |
 | `workboard land` | Land every reviewed task that is waiting |
 | `workboard build` | Build the head of main and record its manifest |
@@ -486,6 +487,19 @@ Lowering `--slots` never kills an agent: the extra workers finish their current 
 | `.worktrees/<task>/` | One checkout per open task |
 
 `.workboard/` and `.worktrees/` are local and belong in `.gitignore`.
+
+## Moving to another machine
+
+Everything a new machine needs to run the project should be in git. What git cannot hold is work in flight and Workboard's own history, and `workboard move-check` lists both.
+
+1. **Drain:** `workboard drain`. Workers finish reviews and landing; nothing new is authored.
+2. **Wait** until `workboard status` shows nothing `CLAIMED`, `REVIEWING`, `AWAITING_REVIEW` or `LANDING`. A `NEEDS_TAKEOVER` task keeps its worktree; land it with `workboard worker --harness <h> --once` after `workboard resume`, or leave it and copy its worktree.
+3. **Check:** `workboard move-check`. It exits 0 only when nothing unique remains: no local ref with commits that have no equivalent patch on main (a branch already landed by cherry-pick or rebase is shown but not counted), no stash, no worktree with uncommitted files, no task in flight. Land, push or `git bundle` whatever it marks `LOSE`.
+4. **Stop the workers:** `workboard down`, then wait for them to exit.
+5. **Copy the state** it lists (`.workboard/workboard.db` keeps task history, attempts, builds, sign-off and audit findings; `handoffs/`, `builds/` and `audits/` keep their evidence; `logs/` is optional) to the same place under the new clone.
+6. **On the new machine:** clone, install the project's toolchain and the agent CLIs, sign each CLI in, copy the state, then `workboard sync`, `workboard resume` and `workboard up`.
+
+[docs/multi-machine.md](docs/multi-machine.md) is the separate design for running workers on several machines at once.
 
 ## Limits
 

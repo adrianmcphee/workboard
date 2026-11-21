@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import __version__, audits, builds, compile_queue, config, control, dashboard, interventions, queue, store, tasks, template, train, usage, worker
+from . import __version__, audits, builds, compile_queue, config, control, dashboard, interventions, movecheck, queue, store, tasks, template, train, usage, worker
 
 
 def _open(args: argparse.Namespace):
@@ -171,6 +171,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
     queue.set_draining(conn, False, "cli")
     print("resumed: workers claim new work again")
     return 0
+
+
+def cmd_move_check(args: argparse.Namespace) -> int:
+    cfg, conn = _open(args)
+    report = movecheck.check(cfg, conn)
+    print(json.dumps(report, indent=2) if args.json else "\n".join(movecheck.lines(report)))
+    return 1 if report["would_lose"] else 0
 
 
 def cmd_worker(args: argparse.Namespace) -> int:
@@ -392,6 +399,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--now", action="store_true")
     add("drain", cmd_drain, "stop new authoring and audit jobs on every harness; in-flight work still lands")
     add("resume", cmd_resume, "undo `workboard drain`")
+    add("move-check", cmd_move_check, "what would be lost moving this project to another machine (exit 1 if anything)"
+        ).add_argument("--json", action="store_true")
     p = add("worker", cmd_worker, "run one worker in the foreground")
     p.add_argument("--harness", required=True)
     p.add_argument("--slot", type=int, default=1)
