@@ -47,7 +47,7 @@ def note_takeover(cfg: Config, task_id: str, harness: str, heading: str, detail:
 
 
 def land_task(cfg: Config, conn: sqlite3.Connection, task_id: str, branch: str, worker: str) -> str:
-    if not queue.take_landing(conn, task_id, worker, os.getpid()):
+    if queue.landing_held(conn) or not queue.take_landing(conn, task_id, worker, os.getpid()):
         return "LANDING"
     log = log_path(cfg, task_id, "workboard", "land")
     try:
@@ -71,12 +71,15 @@ def land_task(cfg: Config, conn: sqlite3.Connection, task_id: str, branch: str, 
     return queue.land_failed(conn, cfg, task_id, detail)
 
 
-def land_pending(cfg: Config, conn: sqlite3.Connection, worker: str) -> int:
+def land_pending(cfg: Config, conn: sqlite3.Connection, worker: str) -> dict[str, object]:
+    """Land every reviewed task that is waiting. Under a landing hold, return at once without touching the queue or git."""
+    if queue.landing_held(conn):
+        return {"landed": 0, "reason": "landing_hold_all"}
     count = 0
     for row in conn.execute("SELECT task_id, branch FROM tasks WHERE status='LANDING' ORDER BY priority DESC, updated_at").fetchall():
         if land_task(cfg, conn, row["task_id"], row["branch"], worker) == "DONE":
             count += 1
-    return count
+    return {"landed": count}
 
 
 class Worker:

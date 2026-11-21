@@ -142,6 +142,15 @@ def fleet_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
         cards.append(card("HIGH", "draining", "The fleet is draining",
                           f"No new authoring or audit jobs are handed out; {flying} task(s) are still in flight. "
                           "Reviews and landing continue.", "workboard resume   (or, before moving machines: workboard move-check)"))
+    if queue.finish_only(conn):
+        cards.append(card("HIGH", "finish_only", "The fleet is finishing started work only",
+                          "Reviews, takeovers and landing continue; no task or audit job that never began is started.",
+                          "workboard finish-only off"))
+    if queue.landing_held(conn):
+        waiting = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='LANDING'").fetchone()[0]
+        cards.append(card("HIGH", "landing_held", "Landing is held",
+                          f"Nothing lands on the main branch; {waiting} reviewed task(s) wait in LANDING.",
+                          "workboard landing-hold off"))
     for row in directives.active(conn):
         did, mode = str(row["directive_id"]), str(row["mode"])
         sev = "CRITICAL" if mode in ("cancel_builds", "abort_leases") else (

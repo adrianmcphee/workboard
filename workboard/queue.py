@@ -42,13 +42,41 @@ def draining(conn: sqlite3.Connection) -> bool:
     return bool(store.get_meta(conn, DRAIN_KEY))
 
 
-def set_draining(conn: sqlite3.Connection, on: bool, actor: str) -> None:
+def _set_flag(conn: sqlite3.Connection, key: str, on: bool, actor: str, kinds: tuple[str, str]) -> None:
     with store.write(conn):
         if on:
-            store.set_meta(conn, DRAIN_KEY, str(int(time.time())))
+            store.set_meta(conn, key, str(int(time.time())))
         else:
-            conn.execute("DELETE FROM meta WHERE key=?", (DRAIN_KEY,))
-        store.event(conn, actor, "fleet_drain" if on else "fleet_resume")
+            conn.execute("DELETE FROM meta WHERE key=?", (key,))
+        store.event(conn, actor, kinds[0] if on else kinds[1])
+
+
+def set_draining(conn: sqlite3.Connection, on: bool, actor: str) -> None:
+    _set_flag(conn, DRAIN_KEY, on, actor, ("fleet_drain", "fleet_resume"))
+
+
+FINISH_ONLY_KEY = "fleet_finish_only"
+
+
+def finish_only(conn: sqlite3.Connection) -> bool:
+    """True while the fleet only finishes started work: reviews, takeovers and landing, never a never-started task."""
+    return bool(store.get_meta(conn, FINISH_ONLY_KEY))
+
+
+def set_finish_only(conn: sqlite3.Connection, on: bool, actor: str) -> None:
+    _set_flag(conn, FINISH_ONLY_KEY, on, actor, ("finish_only_on", "finish_only_off"))
+
+
+LANDING_HOLD_KEY = "landing_hold_all"
+
+
+def landing_held(conn: sqlite3.Connection) -> bool:
+    """True while nothing may land on main: reviewed tasks wait in LANDING, untouched."""
+    return bool(store.get_meta(conn, LANDING_HOLD_KEY))
+
+
+def set_landing_hold(conn: sqlite3.Connection, on: bool, actor: str) -> None:
+    _set_flag(conn, LANDING_HOLD_KEY, on, actor, ("landing_hold_on", "landing_hold_off"))
 
 
 def paths_overlap(left: list[str], right: list[str]) -> bool:
@@ -128,7 +156,8 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
 
     With `review_only`, stop after the review step, so the worker can offer audit work next.
     While the fleet is draining, reviews are still handed out so in-flight work lands, but no authoring is,
-    unless a person names the task.
+    unless a person names the task. In finish-only mode, reviews and takeovers are handed out but a READY task
+    that was never started is not, unless a person names it.
     """
     now = now or time.time()
     with store.write(conn):
@@ -187,6 +216,10 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
                 return {"claimed": False, "reason": "task_not_claimable"}
         else:
             raw_candidates = conn.execute("SELECT * FROM tasks WHERE status IN ('READY','NEEDS_TAKEOVER')").fetchall()
+            refused_fresh = False
+            if finish_only(conn):
+                refused_fresh = any(c["status"] == "READY" for c in raw_candidates)
+                raw_candidates = [c for c in raw_candidates if c["status"] == "NEEDS_TAKEOVER"]
             task_blocker = None
             candidates = []
             for cand in raw_candidates:
@@ -199,7 +232,7 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
                 if task_blocker:
                     return {"claimed": False, "reason": "directive", "directive_id": task_blocker["directive_id"],
                             "mode": task_blocker["mode"], "message": task_blocker["message"]}
-                return {"claimed": False, "reason": "no_ready_work"}
+                return {"claimed": False, "reason": "finish_only" if refused_fresh else "no_ready_work"}
             flight = {r["task_id"]: store.loads(r["paths_json"]) for r in conn.execute(
                 f"SELECT task_id, paths_json FROM tasks WHERE status IN ({','.join('?' * len(store.IN_FLIGHT))})",
                 store.IN_FLIGHT).fetchall()}

@@ -57,6 +57,10 @@ def cmd_status(args: argparse.Namespace) -> int:
               + (f", {mem['mem_available_pct']:.0f}% memory free" if mem.get("mem_available_pct") is not None else ""))
     if snap.get("draining"):
         print("  fleet: draining (no new authoring or audit jobs); `workboard resume` undoes it")
+    if snap.get("finish_only"):
+        print("  fleet: finish-only (reviews, takeovers and landing; no never-started work); `workboard finish-only off` undoes it")
+    if snap.get("landing_held"):
+        print("  landing: held (nothing lands on main); `workboard landing-hold off` releases it")
     for item in snap.get("directives") or []:  # type: ignore[union-attr]
         print(f"  directive: {item['directive_id']} [{item['mode']}] ({item['scope']}): {item['message']}")
     for line in snap["usage_lines"]:  # type: ignore[union-attr]
@@ -175,6 +179,29 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_finish_only(args: argparse.Namespace) -> int:
+    _, conn = _open(args)
+    queue.set_finish_only(conn, args.state == "on", "cli")
+    if args.state == "on":
+        print("finish-only: workers take reviews, takeovers and landing, and start no task or audit job that never began.")
+        print("Undo with `workboard finish-only off`.")
+    else:
+        print("finish-only off: workers start new work again")
+    return 0
+
+
+def cmd_landing_hold(args: argparse.Namespace) -> int:
+    _, conn = _open(args)
+    queue.set_landing_hold(conn, args.state == "on", "cli")
+    if args.state == "on":
+        waiting = in_flight(conn).get("LANDING", 0)
+        print(f"landing held: nothing lands on main and the landing step touches neither the queue nor git; {waiting} task(s) wait in LANDING.")
+        print("Undo with `workboard landing-hold off`.")
+    else:
+        print("landing released: reviewed tasks land again")
+    return 0
+
+
 def cmd_move_check(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
     report = movecheck.check(cfg, conn)
@@ -233,7 +260,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
 def cmd_land(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
-    print(f"landed {worker.land_pending(cfg, conn, 'cli')} task(s)")
+    result = worker.land_pending(cfg, conn, "cli")
+    if result.get("reason") == "landing_hold_all":
+        print("landing is held (landing_hold_all); nothing landed. `workboard landing-hold off` releases it.")
+        return 0
+    print(f"landed {result['landed']} task(s)")
     return 0
 
 
@@ -444,6 +475,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--now", action="store_true")
     add("drain", cmd_drain, "stop new authoring and audit jobs on every harness; in-flight work still lands")
     add("resume", cmd_resume, "undo `workboard drain`")
+    add("finish-only", cmd_finish_only, "finish started work (reviews, takeovers, landing) and start nothing new"
+        ).add_argument("state", choices=("on", "off"))
+    add("landing-hold", cmd_landing_hold, "hold every landing so main stays where it is (for example during a release)"
+        ).add_argument("state", choices=("on", "off"))
     add("move-check", cmd_move_check, "what would be lost moving this project to another machine (exit 1 if anything)"
         ).add_argument("--json", action="store_true")
     p = add("move-archive", cmd_move_archive, "snapshot dirty worktrees and push unique refs/stashes to refs/archive/<date>/")

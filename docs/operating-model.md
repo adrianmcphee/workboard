@@ -83,6 +83,7 @@ The fleet handles claiming, retrying, reviewing and landing on its own. It leave
 - Whether a slice in a build is acceptable, or whether a proposed `wont-fix` audit finding should be accepted or reopened.
 - Whether to spend a subscription fast or make it last until its reset.
 - When to drain the fleet, pause claims, wrap up in-flight turns or cancel running compiles (`workboard drain`, `workboard directive`).
+- When the fleet should only finish started work, and when main must not move, for example while a release builds from it (`workboard finish-only`, `workboard landing-hold`).
 - What to do with a task or audit job that has used all its attempts.
 - Whether a brief that keeps failing should be rewritten, split or dropped.
 

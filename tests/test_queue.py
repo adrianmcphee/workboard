@@ -113,6 +113,28 @@ class ClaimRules(ProjectCase):
         kinds = [r[0] for r in self.conn.execute("SELECT kind FROM events WHERE kind LIKE 'fleet_%' ORDER BY id")]
         self.assertEqual(kinds, ["fleet_drain", "fleet_resume"])
 
+    def test_finish_only_refuses_never_started_work_but_hands_out_takeovers_and_reviews(self) -> None:
+        self.task("fresh", priority=900)
+        self.task("half")
+        self.task("flying")
+        self.sync()
+        got = self.claim("alpha", task_id="half")
+        queue.finish_author(self.conn, self.cfg, "half", str(got["token"]), ok=False, reason="no commits")
+        self.to_review("flying")
+        queue.set_finish_only(self.conn, True, "test")
+        self.assertTrue(queue.finish_only(self.conn))
+        got = self.claim("beta")
+        self.assertEqual((got["role"], got["task_id"]), ("review", "flying"))
+        got = self.claim("beta")
+        self.assertEqual((got["role"], got["task_id"], got["takeover"]), ("author", "half", True))
+        self.assertEqual(self.claim("alpha")["reason"], "finish_only")
+        self.assertEqual(self.status("fresh"), "READY")
+        self.assertEqual(self.claim("alpha", task_id="fresh")["task_id"], "fresh")  # a person's explicit claim
+        queue.set_finish_only(self.conn, False, "test")
+        self.assertFalse(queue.finish_only(self.conn))
+        kinds = [r[0] for r in self.conn.execute("SELECT kind FROM events WHERE kind LIKE 'finish_only_%' ORDER BY id")]
+        self.assertEqual(kinds, ["finish_only_on", "finish_only_off"])
+
 
 class Leases(ProjectCase):
     def test_lost_heartbeat_dead_worker_and_deadline_all_release_the_task(self) -> None:

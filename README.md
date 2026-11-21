@@ -295,6 +295,7 @@ BLOCKED -> READY -> CLAIMED -> AWAITING_REVIEW -> REVIEWING -> LANDING -> DONE
 - **A quota stop or a directive abort is not an attempt.** When an agent's output matches a `quota_patterns` entry, that harness cools down and the task returns to the queue without spending an attempt. Ending a lease with `workboard directive set --mode abort_leases` also preserves its attempt count.
 - **A reviewer that writes no verdict has not rejected anything.** The review is offered to another harness.
 - **Authors build and test only what their task touches,** one heavy command at a time, and end their notes with a `## Commands run` section. Reviewers judge the tests from that record and the guards, and never fail a branch for how it was built. A command the brief names for its acceptance runs once, near the end.
+- **Every build and test runs in the foreground.** An unattended agent turn ends when the agent stops issuing commands, so a build left in the background to wait for a compile slot dies with the turn and the attempt is lost. Every prompt tells agents to wait for each build in the same command and never to end the turn waiting for a notification. A harness that launches Claude Code (a command named `claude`, or `usage = "claude-code"`) also runs with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, unless its own `env` sets that variable.
 
 Every transition is one transaction and one row in the event log, with the actor that caused it (`workboard events`, `workboard show <task>`).
 
@@ -331,6 +332,8 @@ With `[land] command` empty, Workboard lands a branch itself:
 3. Take the landing lock, fetch again, and push the exact guarded commit to main if main has not moved. If it has, release the lock and start again.
 
 The landed task's worktree and branch are then removed. A worktree with uncommitted changes is never removed.
+
+`workboard landing-hold on` pauses all of this: no rebase, guard or push runs until `workboard landing-hold off` (see [Commands](#commands)).
 
 Set `[land] command` to use your own landing script instead. It runs in the task worktree with `WORKBOARD_TASK` and `WORKBOARD_BRANCH` set, under the same lock.
 
@@ -427,7 +430,7 @@ Set `[usage] policy = "advise"` to keep the display and drop the refusals.
 
 ![The Workboard web console after a build: sign-off verdicts, a rejected slice turned into a fix task, and the event log](docs/images/dashboard.png)
 
-The dashboard lists **potential interventions**: decisions that need a human, each with the command that takes it and usually a button. Examples are a subscription that will run dry, a task or audit job parked for triage, a proposed `wont-fix` finding, repeated landing failures with nothing landing since, compile slots waiting while memory sits free, an active fleet drain or operator directive, a task on its fourth attempt, work blocked behind a cancelled dependency, and critical-path work nobody has claimed.
+The dashboard lists **potential interventions**: decisions that need a human, each with the command that takes it and usually a button. Examples are a subscription that will run dry, a task or audit job parked for triage, a proposed `wont-fix` finding, repeated landing failures with nothing landing since, compile slots waiting while memory sits free, an active fleet drain, finish-only mode, landing hold or operator directive, a task on its fourth attempt, work blocked behind a cancelled dependency, and critical-path work nobody has claimed.
 
 Other controls on the page: change the number of workers per harness, cancel or requeue a task, clear an active directive, and accept or reject each slice of the latest build.
 
@@ -449,6 +452,8 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 | `workboard up [--harness h] [--slots n]` | Start workers or change how many run |
 | `workboard down [--harness h] [--now]` | Stop workers after their current task, or immediately |
 | `workboard drain` / `workboard resume` | Stop handing out new authoring and audit jobs on every harness while reviews and landing finish the work in flight, and undo it |
+| `workboard finish-only on\|off` | Hand out reviews, takeovers and landing only, never a task or audit job that has not started, and undo it |
+| `workboard landing-hold on\|off` | Hold every landing so main stays at its current commit, and release it |
 | `workboard directive set \| list \| clear` | Broadcast scoped instructions, pause claims, wrap up, cancel running compiles or abort leases without spending attempts |
 | `workboard move-check [--json]` | Everything that would be lost moving the project to another machine; exits 1 if anything unique would be |
 | `workboard move-archive [--apply]` | Snapshot dirty worktrees on a temporary index, push unique refs and stashes to `refs/archive/<date>/`, and confirm them on the remote |
@@ -474,6 +479,12 @@ Lowering `--slots` never kills an agent: the extra workers finish their current 
 
 `workboard drain` is the fleet-wide pause, for example before moving to another machine. Workers keep running, but take only reviews, so every slice already authored still gets reviewed and landed. No new authoring, takeover or audit job is handed out until `workboard resume`, except a task a person claims by name. Status and the dashboard show the drain until it is lifted.
 
+`workboard finish-only on` winds the fleet down without stranding started work. Workers still take reviews, takeovers (tasks whose last attempt failed or was abandoned, continued in their own worktree) and landing, and they take over audit jobs that already ran once. They never start a `READY` task or an audit job that has not run: such a claim returns `finish_only`. A task a person claims by name still starts. `workboard finish-only off` lifts it.
+
+`workboard landing-hold on` freezes main. While it is on, the landing step returns `landing_hold_all` at once and touches neither the queue nor git: reviewed tasks wait in `LANDING` with their branches as they are, and authoring and review carry on. A release workflow that builds from main and checks at publish time that its commit is still main's tip turns the hold on before it builds and off after it publishes. `workboard landing-hold off` releases it, and the waiting tasks land on the next landing pass or `workboard land`.
+
+Both switches live in `workboard.db`, record an event when they change, and show in status, the dashboard and as interventions until they are off.
+
 `workboard directive` reaches running agents and shims when you need finer control than a full drain:
 
 ```sh
@@ -493,7 +504,7 @@ workboard directive clear --all
 |---|---|
 | `workboard.toml` | Configuration, committed with the project |
 | `workboard/tasks/*.md` | Task definitions, committed with the project |
-| `.workboard/workboard.db` | Queue, attempts, events, audits, directives and worker registry |
+| `.workboard/workboard.db` | Queue, attempts, events, audits, directives, fleet switches (drain, finish-only, landing hold) and worker registry |
 | `.workboard/handoffs/<task>/` | Rendered prompts, takeover notes, review verdict |
 | `.workboard/logs/` | Agent, landing, build and worker output |
 | `.workboard/builds/` | Build records and sign-off verdicts |

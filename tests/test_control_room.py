@@ -119,6 +119,21 @@ class TrainAndPrompt(ProjectCase):
         self.assertIn(notes, reviewer)
         self.assertIn("## Commands run", reviewer)
         self.assertIn("How the author built is never a reason to fail", reviewer)
+        for text in (author, reviewer):
+            self.assertIn(prompt.FOREGROUND, text)
+
+    def test_claude_code_harness_runs_with_background_tasks_off(self) -> None:
+        from workboard import harness as runner
+        from workboard.config import Harness
+        claude = Harness(name="claude", command=["/usr/local/bin/claude", "-p"])
+        other = Harness(name="codex", command=["codex", "exec"])
+        self.assertEqual(runner.agent_env(claude, {"X": "1"})["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
+        self.assertEqual(runner.agent_env(other).get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
+                         os.environ.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"))  # other harnesses are left alone
+        by_usage = Harness(name="wrapped", command=["agent-wrapper"], usage="claude-code")
+        self.assertEqual(runner.agent_env(by_usage)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
+        chosen = Harness(name="claude", command=["claude"], env={"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"})
+        self.assertEqual(runner.agent_env(chosen)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "0")
 
 
 class BuildsAndSignoff(ProjectCase):
@@ -212,6 +227,32 @@ class Drain(ProjectCase):
         snap = dashboard.snapshot(self.cfg)
         self.assertFalse(snap["draining"])
         self.assertNotIn("draining", [c["kind"] for c in snap["interventions"]])  # type: ignore[union-attr]
+
+    def test_finish_only_and_landing_hold_show_in_status_and_as_cards_until_turned_off(self) -> None:
+        import contextlib, io
+        from workboard import cli
+        self.task("one")
+        self.sync()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--root", str(self.repo), "finish-only", "on"]), 0)
+            self.assertEqual(cli.main(["--root", str(self.repo), "landing-hold", "on"]), 0)
+            self.assertEqual(cli.main(["--root", str(self.repo), "status"]), 0)
+        self.assertIn("fleet: finish-only", out.getvalue())
+        self.assertIn("landing: held", out.getvalue())
+        snap = dashboard.snapshot(self.cfg)
+        self.assertTrue(snap["finish_only"] and snap["landing_held"])
+        kinds = [c["kind"] for c in snap["interventions"]]  # type: ignore[union-attr]
+        self.assertIn("finish_only", kinds)
+        self.assertIn("landing_held", kinds)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["--root", str(self.repo), "finish-only", "off"]), 0)
+            self.assertEqual(cli.main(["--root", str(self.repo), "landing-hold", "off"]), 0)
+        snap = dashboard.snapshot(self.cfg)
+        self.assertFalse(snap["finish_only"] or snap["landing_held"])
+        kinds = [c["kind"] for c in snap["interventions"]]  # type: ignore[union-attr]
+        self.assertNotIn("finish_only", kinds)
+        self.assertNotIn("landing_held", kinds)
 
 
 class Dashboard(ProjectCase):

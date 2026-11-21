@@ -9,6 +9,11 @@ from . import directives, train, usage
 from .config import Config
 
 
+FOREGROUND = ("Run every build and test in the foreground and wait for it in the same command. Never start one in the "
+              "background and end your turn to wait for a notification: an unattended turn ends when you stop issuing "
+              "commands, and a background build dies with it.")
+
+
 def brief_body(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
     if text.startswith("---\n"):
@@ -95,7 +100,7 @@ def render(cfg: Config, claim: dict[str, object], harness: str, worktree: Path,
         parts += ["", "## Working agreement", f"""- Work only in `{worktree}`, on branch `{claim['branch']}`. It was opened from `{cfg.remote_main}`.
 - You have **{lease} minutes**. Commit early; a lease that ends with no commit loses the work in progress.
 - Deliver the whole outcome the brief describes, with the smallest test that fails without it. No placeholders.
-- Build and test only what this task touches, and run one heavy build or test command at a time.{queued} Where the brief names a command for its acceptance, run that command once, near the end. Where the brief says how to build or test, follow the brief.
+- Build and test only what this task touches, and run one heavy build or test command at a time.{queued} {FOREGROUND} Where the brief names a command for its acceptance, run that command once, near the end. Where the brief says how to build or test, follow the brief.
 - Commit in small linear commits. Stage explicit paths. Never create a merge commit, never push, never switch branch.
 - Finish with `git status` completely clean and every guard passing:
 {guards}
@@ -107,6 +112,7 @@ def render(cfg: Config, claim: dict[str, object], harness: str, worktree: Path,
 - Check that the outcome is complete, that the test would fail without the change, and that nothing unrelated changed.
 - Judge the tests from the guards and from the `## Commands run` section of the author's notes in `{notes}`. You may run these guards:
 {guards}
+- {FOREGROUND}{queued}
 - Fail the branch when neither the guards nor those recorded commands show its new or changed tests passing. How the author built is never a reason to fail it.
 - Do **not** modify, commit or stash anything in the worktree.
 - Write your verdict as JSON to `{verdict_path(cfg, task_id)}`:
@@ -131,6 +137,7 @@ def render_audit(cfg: Config, job: dict[str, object], harness: str,
              f"# Audit job `{job_id}`: {job['title']}", "", Path(str(job["brief_path"])).read_text(encoding="utf-8").strip(), "",
              "## Audit assignment", f"""You are auditing commit `{job['sha']}`, checked out in `{job['worktree']}`. You have **{lease} minutes**.
 - The checkout is read-only for you: do not modify, commit or stash anything in it. Any change is saved as a patch and undone.
+- {FOREGROUND}
 - Keep screenshots, logs, measurements and notes in `{evidence}`. Never fix what you find; findings become fix tasks.
 - Record each defect as soon as you find it, naming the task that owns it:
   `{wb} audit file --job {job_id} --task <task id> --severity P0|P1|P2 --title "..." --repro "..." --expected "..." [--step <checklist step>] [--ref <id>]... [--reference "how comparable software behaves"] [--evidence <file>]...`

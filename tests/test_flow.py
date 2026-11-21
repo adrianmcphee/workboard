@@ -112,6 +112,33 @@ class Landing(ProjectCase):
         self.assertEqual(sh(self.tmp, "git", "--git-dir", str(self.remote), "rev-list", "--merges", "main"), "")
 
 
+    def test_landing_hold_leaves_reviewed_work_waiting_and_main_untouched_until_released(self) -> None:
+        import contextlib, io
+        from workboard import cli, worker
+        self.task("held")
+        self.sync()
+        self.work("alpha")
+        before = sh(self.tmp, "git", "--git-dir", str(self.remote), "rev-parse", "main")
+        queue.set_landing_hold(self.conn, True, "test")
+        self.work("beta")  # the review passes; the landing step does not run
+        self.assertEqual(self.status("held"), "LANDING")
+        branch_head = sh(self.cfg.worktree("held"), "git", "rev-parse", "HEAD")
+        last_event = self.conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+        self.assertEqual(worker.land_pending(self.cfg, self.conn, "test"), {"landed": 0, "reason": "landing_hold_all"})
+        self.assertEqual(self.conn.execute("SELECT MAX(id) FROM events").fetchone()[0], last_event)
+        self.assertIsNone(self.row("held")["lease_owner"])
+        self.assertEqual(sh(self.cfg.worktree("held"), "git", "rev-parse", "HEAD"), branch_head)
+        self.assertEqual(sh(self.tmp, "git", "--git-dir", str(self.remote), "rev-parse", "main"), before)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--root", str(self.repo), "land"]), 0)
+            self.assertIn("landing_hold_all", out.getvalue())
+            self.assertEqual(cli.main(["--root", str(self.repo), "landing-hold", "off"]), 0)
+            self.assertEqual(cli.main(["--root", str(self.repo), "land"]), 0)
+        self.assertEqual(self.status("held"), "DONE")
+        self.assertIn("held.txt", self.remote_files())
+
+
 class GuardsAndNoReview(ProjectCase):
     review = "false"
     guards = '"test ! -f forbidden.txt"'

@@ -168,6 +168,19 @@ class AuditClaims(AuditCase):
         queue.set_draining(self.conn, False, "test")
         self.assertTrue(audits.claim(self.conn, self.cfg, "beta", "w1", os.getpid())["claimed"])
 
+    def test_finish_only_takes_over_a_started_audit_job_and_starts_no_new_one(self) -> None:
+        self.checklist("tour", "Tour it.")
+        self.checklist("walk", "Walk it.")
+        audits.open_audit(self.cfg, self.conn)
+        first = audits.claim(self.conn, self.cfg, "alpha", "w1", os.getpid())
+        audits.finish(self.conn, self.cfg, str(first["job_id"]), str(first["token"]), ok=False, reason="try again")
+        queue.set_finish_only(self.conn, True, "test")
+        again = audits.claim(self.conn, self.cfg, "beta", "w2", os.getpid())
+        self.assertEqual(again["job_id"], first["job_id"])
+        self.assertEqual(audits.claim(self.conn, self.cfg, "beta", "w3", os.getpid()), {"claimed": False, "reason": "finish_only"})
+        queue.set_finish_only(self.conn, False, "test")
+        self.assertTrue(audits.claim(self.conn, self.cfg, "beta", "w3", os.getpid())["claimed"])
+
     def test_slice_jobs_prefer_a_harness_other_than_the_author(self) -> None:
         self.cfg.audit_per_slice = True
         self.checklist("tour", "Tour it.")

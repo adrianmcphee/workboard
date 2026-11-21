@@ -32,6 +32,8 @@ Work out which of these applies, then read that section.
 | **Slot** | One worker process for a harness. `slots = 2` runs two agents of that harness at once. |
 | **Task / slice** | One outcome, defined by a Markdown file in `workboard/tasks/`. A slice is a task once it is on its way to a build. |
 | **Drain** | The fleet-wide pause (`workboard drain`): reviews and landing continue, no new authoring or audit job is handed out until `workboard resume`. |
+| **Finish-only** | `workboard finish-only on`: reviews, takeovers and landing continue, and no `READY` task or never-run audit job is started until `workboard finish-only off`. |
+| **Landing hold** | `workboard landing-hold on`: the landing step returns `landing_hold_all` without touching the queue or git, so main stays put (for example while a release builds from it) until `workboard landing-hold off`. |
 | **Directive** | A live operator instruction or control action (`workboard directive set`): scoped guidance, claim hold, wrap-up, build cancellation or lease abort. |
 | **Lease** | A time-limited claim on a task, kept alive by a heartbeat. A lost lease returns the task to the queue. |
 | **Takeover** | A task whose last attempt ended without a result. The next author continues in the same worktree with notes. |
@@ -117,6 +119,7 @@ To check and steer a running fleet:
 
 - `workboard board` lists every task, `workboard show <task>` shows one task's history, `workboard events` prints the event log, and logs are in `.workboard/logs/`.
 - `workboard drain` pauses new authoring and audit claims while reviews and landing finish in-flight work; `workboard resume` lifts it.
+- `workboard finish-only on|off` finishes started work (reviews, takeovers, landing) and starts nothing new; `workboard landing-hold on|off` holds every landing so main does not move.
 - `workboard directive set --mode instruction|pause_claims|wrap_up|cancel_builds|abort_leases --message "..."` (with optional `--harness`, `--role author|review|audit|interactive`, `--task <glob>`, `--ttl-min <n>`, `--kill-builds`) sends live instructions, pauses scoped claims, wraps up mid-turn work, stops tracked compiles, or aborts matching leases without spending attempts (`workboard directive list`, `workboard directive clear <id>|--all`).
 - `workboard audit open|status|jobs|findings|show|decide|requeue|reconcile|report` runs build audits and tracks findings (`F-NNNN`) through root causes (`RC-NNNN`) to verified fixes.
 - `workboard move-check` reports everything unique to this host before moving machines, and `workboard move-archive --apply` snapshots dirty worktrees on a scratch index, pushes unique refs and stashes to `refs/archive/<date>/`, and confirms them on the remote.

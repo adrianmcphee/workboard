@@ -24,13 +24,26 @@ def build_command(harness: Harness, worktree: Path, prompt_file: Path) -> list[s
     return command
 
 
+def launches_claude_code(harness: Harness) -> bool:
+    return harness.usage == "claude-code" or Path(harness.command[0]).name == "claude"
+
+
+def agent_env(harness: Harness, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """The agent's environment. A headless Claude Code turn ends when the agent stops issuing commands, which kills
+    any build it left in the background, so its background tasks are off unless the harness's own env says otherwise."""
+    env = {k: v for k, v in os.environ.items() if k not in harness.env_unset}
+    if launches_claude_code(harness):
+        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+    env.update(harness.env)
+    env.update(extra_env or {})
+    return env
+
+
 def run(harness: Harness, worktree: Path, prompt_file: Path, log: Path, *, beat: Callable[[], bool],
         beat_every_s: float, deadline: float, should_stop: Callable[[], bool] = lambda: False,
         extra_env: dict[str, str] | None = None) -> int:
     """Run the agent to completion. `beat` returns False once the lease is gone, which stops the agent."""
-    env = {k: v for k, v in os.environ.items() if k not in harness.env_unset}
-    env.update(harness.env)
-    env.update(extra_env or {})
+    env = agent_env(harness, extra_env)
     command = build_command(harness, worktree, prompt_file)
     with open(log, "ab") as fh:
         try:

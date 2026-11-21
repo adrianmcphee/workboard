@@ -64,6 +64,7 @@ def snapshot(cfg: Config) -> dict[str, object]:
             "interventions": interventions.collect(cfg, conn, snap, slots, manifest, compiling), "events": events,
             "compile": compiling,
             "audits": audits.overview(conn), "draining": queue.draining(conn),
+            "finish_only": queue.finish_only(conn), "landing_held": queue.landing_held(conn),
             "directives": directives.active(conn, now), "active_builds": directives.live_builds(conn, now),
         }
     finally:
@@ -119,7 +120,7 @@ function render(s){ACTS=[];
  document.getElementById('clock').textContent=`${s.generated_at} · load ${s.load}/${s.cores} · ${s.free_gib} GiB free`;
  const order=['DONE','LANDING','REVIEWING','AWAITING_REVIEW','CLAIMED','READY','BLOCKED','NEEDS_TAKEOVER','NEEDS_TRIAGE','CANCELLED'];
  document.getElementById('kpis').innerHTML=order.filter(k=>s.counts[k]).map(k=>`<div class="kpi"><b>${s.counts[k]}</b><span class="muted">${k.replace(/_/g,' ').toLowerCase()}</span></div>`).join('')||'<span class="muted">No tasks yet. Add files to the tasks folder and run workboard sync.</span>';
- {const q=s.compile||{};const parts=[];if(s.draining)parts.push('Fleet: draining');if(s.directives&&s.directives.length)parts.push(`Directives: ${s.directives.map(d=>d.directive_id+' ['+d.mode+']').join(', ')}`);if(q.enabled)parts.push(`Compile queue: ${q.holders.length}/${q.slots} slot(s) held, ${q.waiters.length} waiting, longest wait ${Math.round(q.longest_wait_s/60)} min, recent p90 wait ${Math.round(q.recent_p90_wait_s)} s`+(q.memory&&q.memory.mem_available_pct!=null?`, ${Math.round(q.memory.mem_available_pct)}% memory free`:''));document.getElementById('compile').textContent=parts.join(' · ')}
+ {const q=s.compile||{};const parts=[];if(s.draining)parts.push('Fleet: draining');if(s.finish_only)parts.push('Fleet: finish-only');if(s.landing_held)parts.push('Landing: held');if(s.directives&&s.directives.length)parts.push(`Directives: ${s.directives.map(d=>d.directive_id+' ['+d.mode+']').join(', ')}`);if(q.enabled)parts.push(`Compile queue: ${q.holders.length}/${q.slots} slot(s) held, ${q.waiters.length} waiting, longest wait ${Math.round(q.longest_wait_s/60)} min, recent p90 wait ${Math.round(q.recent_p90_wait_s)} s`+(q.memory&&q.memory.mem_available_pct!=null?`, ${Math.round(q.memory.mem_available_pct)}% memory free`:''));document.getElementById('compile').textContent=parts.join(' · ')}
  document.getElementById('interventions').innerHTML=s.interventions.length?s.interventions.map(c=>`<div class="card ${esc(c.severity)}"><p><b>${esc(c.title)}</b></p><p>${esc(c.what)}</p><p class="mono">${esc(c.action)}</p>${c.ops.map(o=>btn(o)).join('')}</div>`).join(''):'<p class="muted">No decision is waiting on you.</p>';
  document.getElementById('usage').innerHTML=s.usage.harnesses.map(h=>{
   const head=`<p><b>${esc(h.harness)}</b> <span class="muted">${h.live_slots} worker(s)${h.target_slots==null?'':' of '+h.target_slots}${h.age_s==null?'':' · read '+Math.round(h.age_s/60)+'m ago'+(h.stale?' (stale)':'')}</span></p>`;

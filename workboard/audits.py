@@ -337,6 +337,10 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
         rows = (conn.execute("SELECT * FROM audit_jobs WHERE job_id=? AND status='READY'", (job_id,)).fetchall() if job_id else
                 conn.execute("SELECT * FROM audit_jobs WHERE status='READY'").fetchall())
         rows = [r for r in rows if not r["resource"] or r["resource"] not in held]
+        if not job_id and rows and queue.finish_only(conn):
+            rows = [r for r in rows if r["attempts"] > 0]  # finish-only: take over started jobs, start none
+            if not rows:
+                return {"claimed": False, "reason": "finish_only"}
         if not job_id and rows:
             scoped = None
             kept = []
