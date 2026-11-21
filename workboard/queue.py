@@ -15,7 +15,7 @@ import sqlite3
 import time
 import uuid
 
-from . import store
+from . import directives, store
 from .config import Config
 
 _CLEAR_LEASE = ("lease_owner=NULL, lease_harness=NULL, lease_token=NULL, lease_pid=NULL, "
@@ -147,6 +147,8 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
                 "SELECT pid FROM workers WHERE harness != ?", (harness,)).fetchall())
             pick = None
             for row in waiting:
+                if directives.claim_blocker(conn, harness=harness, role="review", task_id=row["task_id"], now=now):
+                    continue
                 if row["avoid_harness"] == harness and len(waiting) > 1:
                     continue
                 independent = row["author_harness"] != harness
@@ -157,9 +159,18 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
             if pick is not None:
                 return _lease(conn, cfg, pick, "REVIEWING", "review", harness, worker, pid, cfg.review_lease_min, now)
         if review_only:
+            blocker = directives.claim_blocker(conn, harness=harness, role="review", now=now) if not task_id else None
+            if blocker:
+                return {"claimed": False, "reason": "directive", "directive_id": blocker["directive_id"],
+                        "mode": blocker["mode"], "message": blocker["message"]}
             return {"claimed": False, "reason": "no_review_work"}
         if draining(conn) and not task_id:
             return {"claimed": False, "reason": "draining"}
+        if not task_id:
+            blocker = directives.claim_blocker(conn, harness=harness, role="author", now=now)
+            if blocker:
+                return {"claimed": False, "reason": "directive", "directive_id": blocker["directive_id"],
+                        "mode": blocker["mode"], "message": blocker["message"]}
 
         coding = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='CLAIMED'").fetchone()[0]
         if coding >= cfg.max_coding:
@@ -175,8 +186,19 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
             if row is None:
                 return {"claimed": False, "reason": "task_not_claimable"}
         else:
-            candidates = conn.execute("SELECT * FROM tasks WHERE status IN ('READY','NEEDS_TAKEOVER')").fetchall()
+            raw_candidates = conn.execute("SELECT * FROM tasks WHERE status IN ('READY','NEEDS_TAKEOVER')").fetchall()
+            task_blocker = None
+            candidates = []
+            for cand in raw_candidates:
+                b = directives.claim_blocker(conn, harness=harness, role="author", task_id=cand["task_id"], now=now)
+                if b:
+                    task_blocker = task_blocker or b
+                else:
+                    candidates.append(cand)
             if not candidates:
+                if task_blocker:
+                    return {"claimed": False, "reason": "directive", "directive_id": task_blocker["directive_id"],
+                            "mode": task_blocker["mode"], "message": task_blocker["message"]}
                 return {"claimed": False, "reason": "no_ready_work"}
             flight = {r["task_id"]: store.loads(r["paths_json"]) for r in conn.execute(
                 f"SELECT task_id, paths_json FROM tasks WHERE status IN ({','.join('?' * len(store.IN_FLIGHT))})",
@@ -198,9 +220,21 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
 def heartbeat(conn: sqlite3.Connection, cfg: Config, task_id: str, token: str, now: float | None = None) -> bool:
     now = now or time.time()
     with store.write(conn):
-        cur = conn.execute("UPDATE tasks SET heartbeat_expires_at=? WHERE task_id=? AND lease_token=? AND deadline_at>?",
-                           (now + cfg.heartbeat_ttl_s, task_id, token, now))
-        return cur.rowcount == 1
+        row = conn.execute("SELECT status, lease_harness FROM tasks WHERE task_id=? AND lease_token=? AND deadline_at>?",
+                           (task_id, token, now)).fetchone()
+        if row is None:
+            return False
+        role = "author" if row["status"] == "CLAIMED" else "review"
+        if directives.abort_directive(conn, harness=row["lease_harness"], role=role, task_id=task_id, now=now):
+            return False
+        conn.execute("UPDATE tasks SET heartbeat_expires_at=? WHERE task_id=? AND lease_token=?",
+                     (now + cfg.heartbeat_ttl_s, task_id, token))
+        return True
+
+
+def is_rejected_sha(conn: sqlite3.Connection, task_id: str, sha: str) -> bool:
+    return conn.execute("SELECT 1 FROM review_rejections WHERE task_id=? AND candidate_sha=?",
+                        (task_id, sha)).fetchone() is not None
 
 
 def _held(conn: sqlite3.Connection, task_id: str, token: str) -> sqlite3.Row | None:
@@ -219,7 +253,7 @@ def cool_down(conn: sqlite3.Connection, cfg: Config, harness: str, task_id: str 
 
 def finish_author(conn: sqlite3.Connection, cfg: Config, task_id: str, token: str, *, ok: bool,
                   candidate_sha: str | None = None, reason: str = "", quota: bool = False,
-                  now: float | None = None) -> str | None:
+                  aborted: bool = False, now: float | None = None) -> str | None:
     """Record the end of an authoring attempt. Returns the new status, or None if the lease was lost."""
     now = now or time.time()
     with store.write(conn):
@@ -235,12 +269,14 @@ def finish_author(conn: sqlite3.Connection, cfg: Config, task_id: str, token: st
                          f"updated_at=?, {_CLEAR_LEASE} WHERE task_id=?", (status, candidate_sha, harness, now, task_id))
             _end_attempt(conn, task_id, "ready", "", now)
         else:
-            # A quota stop is the subscription's fault, not the slice's, so it does not count as an attempt.
-            attempts = row["attempts"] - (1 if quota else 0)
+            # A quota stop or operator directive abort is not the slice's fault, so it does not spend an attempt.
+            attempts = max(0, row["attempts"] - (1 if (quota or aborted) else 0))
+            avoid = None if aborted else harness
             status = _fail_status(cfg, attempts)
             conn.execute(f"UPDATE tasks SET status=?, attempts=?, avoid_harness=?, reason=?, updated_at=?, {_CLEAR_LEASE} "
-                         "WHERE task_id=?", (status, attempts, harness, reason[:500], now, task_id))
-            _end_attempt(conn, task_id, "quota" if quota else "incomplete", reason, now)
+                         "WHERE task_id=?", (status, attempts, avoid, reason[:500], now, task_id))
+            outcome = "aborted" if aborted else ("quota" if quota else "incomplete")
+            _end_attempt(conn, task_id, outcome, reason, now)
         store.event(conn, row["lease_owner"], "author_finished", task_id, f"{status} {reason}".strip(), now)
         return status
 
@@ -257,6 +293,9 @@ def finish_review(conn: sqlite3.Connection, cfg: Config, task_id: str, token: st
             status, avoid, reason = "LANDING", None, None
         elif verdict == "fail":
             status, avoid, reason = _fail_status(cfg, row["attempts"]), None, "review_rejected"
+            if row["candidate_sha"]:
+                conn.execute("INSERT OR IGNORE INTO review_rejections (task_id, candidate_sha, at) VALUES (?,?,?)",
+                             (task_id, row["candidate_sha"], now))
         else:
             last_author = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attempts WHERE task_id=? AND role='author'",
                                        (task_id,)).fetchone()[0]

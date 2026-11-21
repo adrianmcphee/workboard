@@ -322,6 +322,12 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
             return {"claimed": False, "reason": "usage"}
         if queue.draining(conn) and not job_id:
             return {"claimed": False, "reason": "draining"}
+        from . import directives
+        if not job_id:
+            blocker = directives.claim_blocker(conn, harness=harness, role="audit", now=now)
+            if blocker:
+                return {"claimed": False, "reason": "directive", "directive_id": blocker["directive_id"],
+                        "mode": blocker["mode"], "message": blocker["message"]}
         if not job_id:
             urgent = conn.execute("SELECT task_id FROM tasks WHERE status IN ('READY','NEEDS_TAKEOVER') AND priority>=? LIMIT 1",
                                   (SEVERITY_PRIORITY["P0"],)).fetchone()
@@ -331,6 +337,19 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
         rows = (conn.execute("SELECT * FROM audit_jobs WHERE job_id=? AND status='READY'", (job_id,)).fetchall() if job_id else
                 conn.execute("SELECT * FROM audit_jobs WHERE status='READY'").fetchall())
         rows = [r for r in rows if not r["resource"] or r["resource"] not in held]
+        if not job_id and rows:
+            scoped = None
+            kept = []
+            for r in rows:
+                b = directives.claim_blocker(conn, harness=harness, role="audit", task_id=r["job_id"], now=now)
+                if b:
+                    scoped = scoped or b
+                else:
+                    kept.append(r)
+            if not kept and scoped:
+                return {"claimed": False, "reason": "directive", "directive_id": scoped["directive_id"],
+                        "mode": scoped["mode"], "message": scoped["message"]}
+            rows = kept
         if not rows:
             return {"claimed": False, "reason": "no_audit_work"}
         row = min(rows, key=lambda r: (r["avoid_harness"] == harness, KIND_ORDER.get(r["kind"], 9), r["audit_id"], r["job_id"]))
@@ -348,11 +367,18 @@ def claim(conn: sqlite3.Connection, cfg: Config, harness: str, worker: str, pid:
 
 
 def heartbeat(conn: sqlite3.Connection, cfg: Config, job_id: str, token: str, now: float | None = None) -> bool:
+    from . import directives
     now = now or _now()
     with store.write(conn):
-        cur = conn.execute("UPDATE audit_jobs SET heartbeat_expires_at=? WHERE job_id=? AND lease_token=? AND deadline_at>?",
-                           (now + cfg.heartbeat_ttl_s, job_id, token, now))
-        return cur.rowcount == 1
+        row = conn.execute("SELECT lease_harness FROM audit_jobs WHERE job_id=? AND lease_token=? AND deadline_at>?",
+                           (job_id, token, now)).fetchone()
+        if row is None:
+            return False
+        if directives.abort_directive(conn, harness=row["lease_harness"], role="audit", task_id=job_id, now=now):
+            return False
+        conn.execute("UPDATE audit_jobs SET heartbeat_expires_at=? WHERE job_id=? AND lease_token=?",
+                     (now + cfg.heartbeat_ttl_s, job_id, token))
+        return True
 
 
 def _job(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
@@ -363,7 +389,7 @@ def _job(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
 
 
 def finish(conn: sqlite3.Connection, cfg: Config, job_id: str, token: str, *, ok: bool, reason: str = "",
-           quota: bool = False, now: float | None = None) -> str | None:
+           quota: bool = False, aborted: bool = False, now: float | None = None) -> str | None:
     """Record the end of an audit job. Returns the new status, or None if the lease was lost."""
     now = now or _now()
     with store.write(conn):
@@ -389,10 +415,11 @@ def finish(conn: sqlite3.Connection, cfg: Config, job_id: str, token: str, *, ok
             conn.execute(f"UPDATE audit_jobs SET status='DONE', finished_by=?, finished_at=?, reason=NULL, updated_at=?, {_CLEAR} "
                          "WHERE job_id=?", (harness, now, now, job_id))
         else:
-            attempts = row["attempts"] - (1 if quota else 0)
+            attempts = max(0, row["attempts"] - (1 if (quota or aborted) else 0))
+            avoid = None if aborted else harness
             status = "NEEDS_TRIAGE" if attempts >= cfg.max_attempts else "READY"
             conn.execute(f"UPDATE audit_jobs SET status=?, attempts=?, avoid_harness=?, reason=?, updated_at=?, {_CLEAR} "
-                         "WHERE job_id=?", (status, attempts, harness, reason[:500], now, job_id))
+                         "WHERE job_id=?", (status, attempts, avoid, reason[:500], now, job_id))
         store.event(conn, row["lease_owner"] or "system", "audit_job_finished",
                     row["subject"] if row["kind"] == "slice" else None, f"{job_id} {status} {reason}".strip(), now)
         _refresh(conn, cfg, now)

@@ -153,6 +153,39 @@ CREATE TABLE IF NOT EXISTS root_causes (
   generation INTEGER NOT NULL DEFAULT 1,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS review_rejections (
+  task_id TEXT NOT NULL,
+  candidate_sha TEXT NOT NULL,
+  at REAL NOT NULL,
+  PRIMARY KEY (task_id, candidate_sha)
+);
+CREATE TABLE IF NOT EXISTS directives (
+  directive_id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at REAL NOT NULL,
+  expires_at REAL,
+  cleared_at REAL,
+  scope_harness TEXT,
+  scope_role TEXT,
+  scope_task TEXT,
+  mode TEXT NOT NULL,
+  message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS directives_active ON directives (active, seq);
+CREATE TABLE IF NOT EXISTS active_builds (
+  build_id TEXT PRIMARY KEY,
+  pid INTEGER NOT NULL,
+  pgid INTEGER NOT NULL,
+  slot TEXT NOT NULL DEFAULT '',
+  worker TEXT NOT NULL DEFAULT '',
+  harness TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL DEFAULT '',
+  cwd TEXT NOT NULL DEFAULT '',
+  cmd TEXT NOT NULL DEFAULT '',
+  started_at REAL NOT NULL
+);
 """
 
 OPEN_STATUSES = ("BLOCKED", "READY", "CLAIMED", "AWAITING_REVIEW", "REVIEWING", "LANDING", "NEEDS_TAKEOVER", "NEEDS_TRIAGE")

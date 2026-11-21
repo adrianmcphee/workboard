@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import __version__, audits, builds, compile_queue, config, control, dashboard, interventions, movecheck, queue, store, tasks, template, train, usage, worker
+from . import __version__, audits, builds, compile_queue, config, control, dashboard, directives, interventions, movecheck, queue, store, tasks, template, train, usage, worker
 
 
 def _open(args: argparse.Namespace):
@@ -57,6 +57,8 @@ def cmd_status(args: argparse.Namespace) -> int:
               + (f", {mem['mem_available_pct']:.0f}% memory free" if mem.get("mem_available_pct") is not None else ""))
     if snap.get("draining"):
         print("  fleet: draining (no new authoring or audit jobs); `workboard resume` undoes it")
+    for item in snap.get("directives") or []:  # type: ignore[union-attr]
+        print(f"  directive: {item['directive_id']} [{item['mode']}] ({item['scope']}): {item['message']}")
     for line in snap["usage_lines"]:  # type: ignore[union-attr]
         print(f"  usage: {line}")
     for build in snap["train"]["builds"][:2]:  # type: ignore[index]
@@ -178,6 +180,49 @@ def cmd_move_check(args: argparse.Namespace) -> int:
     report = movecheck.check(cfg, conn)
     print(json.dumps(report, indent=2) if args.json else "\n".join(movecheck.lines(report)))
     return 1 if report["would_lose"] else 0
+
+
+def cmd_move_archive(args: argparse.Namespace) -> int:
+    cfg, conn = _open(args)
+    result = movecheck.archive(cfg, conn, apply=args.apply, date=args.date, max_file_mb=args.max_file_mb)
+    print(json.dumps(result, indent=2) if args.json else "\n".join(movecheck.archive_lines(result)))
+    return 0 if result["ok"] else 1
+
+
+def cmd_directive(args: argparse.Namespace) -> int:
+    cfg, conn = _open(args)
+    if args.directive_cmd == "set":
+        res = directives.set_directive(
+            conn, mode=args.mode, message=args.message, harness=args.harness, role=args.role,
+            task_id=args.task, ttl_min=args.ttl_min, kill_builds=args.kill_builds,
+            valid_harnesses=set(cfg.harnesses), actor="cli",
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        row = res["directive"]  # type: ignore[index]
+        stopped = len(res["signalled_builds"])  # type: ignore[arg-type]
+        extra = f"; stopped {stopped} running compile(s)" if stopped else ""
+        print(f"{row['directive_id']} [{row['mode']}] ({row['scope']}): {row['message']}{extra}")
+        return 0
+    if args.directive_cmd == "clear":
+        ids = directives.clear(conn, directive_id=args.directive_id, clear_all=args.all, actor="cli")
+        print(f"cleared {', '.join(ids)}" if ids else "nothing active matched")
+        return 0
+    rows = directives.list_all(conn, include_inactive=args.all)
+    live = directives.live_builds(conn)
+    if args.json:
+        print(json.dumps({"directives": rows, "active_builds": live}, indent=2))
+        return 0
+    if not rows:
+        print("no active directives")
+    for row in rows:
+        state = "" if row.get("effective_active", True) else " (inactive)"
+        ttl = f", {row['remaining_s']}s left" if row.get("remaining_s") is not None else ""
+        print(f"{row['directive_id']}{state} [{row['mode']}] ({row['scope']}{ttl}): {row['message']}")
+    for b in live:
+        print(f"  compile pid={b['pid']} slot={b['slot']} task={b['task_id'] or '-'} {b['age_s']}s: {b['cmd']}")
+    return 0
 
 
 def cmd_worker(args: argparse.Namespace) -> int:
@@ -401,6 +446,28 @@ def parser() -> argparse.ArgumentParser:
     add("resume", cmd_resume, "undo `workboard drain`")
     add("move-check", cmd_move_check, "what would be lost moving this project to another machine (exit 1 if anything)"
         ).add_argument("--json", action="store_true")
+    p = add("move-archive", cmd_move_archive, "snapshot dirty worktrees and push unique refs/stashes to refs/archive/<date>/")
+    p.add_argument("--apply", action="store_true", help="snapshot, push and confirm on the remote (default: dry run)")
+    p.add_argument("--date", help="archive folder date (default: today YYYY-MM-DD)")
+    p.add_argument("--max-file-mb", type=int, default=50)
+    p.add_argument("--json", action="store_true")
+    p = add("directive", cmd_directive, "broadcast scoped instructions, pause claims, wrap up or cancel builds")
+    dsub = p.add_subparsers(dest="directive_cmd", required=True)
+    ds = dsub.add_parser("set", help="add an active directive")
+    ds.add_argument("--mode", choices=directives.MODES, required=True)
+    ds.add_argument("--message", required=True)
+    ds.add_argument("--harness")
+    ds.add_argument("--role", choices=directives.ROLES)
+    ds.add_argument("--task", help="exact task/job id or glob such as export-*")
+    ds.add_argument("--ttl-min", type=float)
+    ds.add_argument("--kill-builds", action="store_true")
+    ds.add_argument("--json", action="store_true")
+    dl = dsub.add_parser("list", help="list active directives and tracked compiles")
+    dl.add_argument("--all", action="store_true")
+    dl.add_argument("--json", action="store_true")
+    dc = dsub.add_parser("clear", help="clear one directive or --all")
+    dc.add_argument("directive_id", nargs="?")
+    dc.add_argument("--all", action="store_true")
     p = add("worker", cmd_worker, "run one worker in the foreground")
     p.add_argument("--harness", required=True)
     p.add_argument("--slot", type=int, default=1)

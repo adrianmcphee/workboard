@@ -309,12 +309,14 @@ slots = 3                     # about RAM / peak GiB of one heavy build
 [compile.tools.cargo]
 subcommands = ["build", "test", "check", "clippy", "nextest", "run", "bench", "rustc", "doc"]
 value_options = ["-C", "--config", "-Z", "--color"]
+warm = true                   # build in one fixed checkout per slot so incremental caches stay warm across worktrees
 
 [compile.tools.cmake]
 flags = ["--build"]
 ```
 
 - Every agent, guard, landing and scheduled build runs with a shim directory first on its `PATH`, one shim per tool listed. A heavy invocation (a listed subcommand as the first word, or a listed flag anywhere; the value after a `value_options` entry is skipped) holds one slot for its whole life. Anything else, and anything started inside a heavy command, runs straight away.
+- With `warm = true` on a tool, each slot owns a fixed checkout under `.workboard/compile/worktrees/slot-<n>`. The shim snapshots the caller's working tree (including uncommitted edits and new files) on a temporary Git index without touching the caller's own index or stash, checks that snapshot out in the slot (rewriting only changed files so timestamps and incremental compiler outputs stay warm across task worktrees), and remaps checkout-relative path arguments. A worktree prefers the slot it built in last. Set `WORKBOARD_WARM=0` to build in place for one command.
 - Waiters line up behind one queue lock, so a build that just arrived never overtakes one that has waited for minutes.
 - Every heavy command appends `queued`, `acquired` (with `wait_s`), `released` (with `hold_s`) and, if it was stopped while waiting, `abandoned` to `.workboard/compile/events.jsonl`, with the working directory, the command and a memory reading (total, share available, and the compressor size on macOS). Use it to size `slots` from measurements rather than guesses.
 - `workboard status` and the dashboard show slots held, builds waiting, the longest wait and free memory. When builds wait longer than `alert_wait_min` while at least `alert_free_pct` of memory is free, an intervention says the slot count is what holds them back.
@@ -447,7 +449,9 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 | `workboard up [--harness h] [--slots n]` | Start workers or change how many run |
 | `workboard down [--harness h] [--now]` | Stop workers after their current task, or immediately |
 | `workboard drain` / `workboard resume` | Stop handing out new authoring and audit jobs on every harness while reviews and landing finish the work in flight, and undo it |
+| `workboard directive set \| list \| clear` | Broadcast scoped instructions, pause claims, wrap up, cancel running compiles or abort leases without spending attempts |
 | `workboard move-check [--json]` | Everything that would be lost moving the project to another machine; exits 1 if anything unique would be |
+| `workboard move-archive [--apply]` | Snapshot dirty worktrees on a temporary index, push unique refs and stashes to `refs/archive/<date>/`, and confirm them on the remote |
 | `workboard worker --harness h [--once]` | Run one worker in the foreground |
 | `workboard land` | Land every reviewed task that is waiting |
 | `workboard build` | Build the head of main and record its manifest |
@@ -469,6 +473,19 @@ The dashboard binds to `127.0.0.1`. Every write needs a token that only the serv
 Lowering `--slots` never kills an agent: the extra workers finish their current task and exit. `workboard down --now` stops agents mid-task, and their tasks continue later as takeovers.
 
 `workboard drain` is the fleet-wide pause, for example before moving to another machine. Workers keep running, but take only reviews, so every slice already authored still gets reviewed and landed. No new authoring, takeover or audit job is handed out until `workboard resume`, except a task a person claims by name. Status and the dashboard show the drain until it is lifted.
+
+`workboard directive` reaches running agents and shims when you need finer control than a full drain:
+
+```sh
+workboard directive set --mode cancel_builds --message "Free memory now"
+workboard directive set --mode wrap_up --message "Finish current checks, write notes and stop"
+workboard directive set --mode instruction --role review --harness codex --message "Focus on FFI boundary safety"
+workboard directive set --mode abort_leases --task "export-*" --message "Hold export work"
+workboard directive list
+workboard directive clear --all
+```
+
+`instruction` adds your note to matching prompts and prints it once on stderr at the next compile boundary. `pause_claims` holds matching claims. `wrap_up` holds claims and refuses new heavy compiles with your message on stderr so mid-turn agents wrap up cleanly. `cancel_builds` sends `SIGTERM` to matching tracked compiles and refuses new ones while active. `abort_leases` ends matching active leases at the next heartbeat without spending an attempt.
 
 ## Where state lives
 
@@ -494,7 +511,7 @@ Everything a new machine needs to run the project should be in git. What git can
 
 1. **Drain:** `workboard drain`. Workers finish reviews and landing; nothing new is authored.
 2. **Wait** until `workboard status` shows nothing `CLAIMED`, `REVIEWING`, `AWAITING_REVIEW` or `LANDING`. A `NEEDS_TAKEOVER` task keeps its worktree; land it with `workboard worker --harness <h> --once` after `workboard resume`, or leave it and copy its worktree.
-3. **Check:** `workboard move-check`. It exits 0 only when nothing unique remains: no local ref with commits that have no equivalent patch on main (a branch already landed by cherry-pick or rebase is shown but not counted), no stash, no worktree with uncommitted files, no task in flight. Land, push or `git bundle` whatever it marks `LOSE`.
+3. **Check and archive:** `workboard move-check`. It exits 0 only when nothing unique remains: no local ref with commits that have no equivalent patch on main (a branch already landed by cherry-pick or rebase is shown but not counted), no stash, no worktree with uncommitted files, no task in flight. Run `workboard move-archive --apply` to snapshot dirty worktrees onto `refs/recovery/<date>/worktrees/<name>` without touching their index, push every unique ref and stash to `refs/archive/<date>/` on the remote without forcing, and confirm every pushed commit on the remote.
 4. **Stop the workers:** `workboard down`, then wait for them to exit.
 5. **Copy the state** it lists (`.workboard/workboard.db` keeps task history, attempts, builds, sign-off and audit findings; `handoffs/`, `builds/` and `audits/` keep their evidence; `logs/` is optional) to the same place under the new clone.
 6. **On the new machine:** clone, install the project's toolchain and the agent CLIs, sign each CLI in, copy the state, then `workboard sync`, `workboard resume` and `workboard up`.

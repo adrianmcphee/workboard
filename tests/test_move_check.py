@@ -59,3 +59,30 @@ class MoveCheck(ProjectCase):
         refs = {r["ref"]: r for r in self.report()["refs"]}  # type: ignore[union-attr]
         self.assertEqual((refs["refs/heads/landed"]["ahead"], refs["refs/heads/landed"]["unique"]), (1, 0))
         self.assertFalse(self.report()["would_lose"])
+
+    def test_move_archive_snapshots_dirty_worktrees_pushes_unique_refs_and_confirms_remote(self) -> None:
+        sh(self.repo, "git", "checkout", "-q", "-b", "unlanded")
+        branch_sha = self.commit("unlanded.txt", "keep me\n")
+        sh(self.repo, "git", "checkout", "-q", "main")
+        (self.repo / "README.md").write_text("dirty edit\n")
+        sh(self.repo, "git", "stash", "push", "-q", "-m", "saved stash")
+        (self.repo / "README.md").write_text("uncommitted takeover edit\n")
+        (self.repo / "new-note.txt").write_text("untracked note\n")
+        before_status = sh(self.repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
+
+        dry = movecheck.archive(self.cfg, self.conn, apply=False, date="2030-01-15")
+        self.assertFalse(dry["ok"])
+        self.assertEqual(len(dry["snapshots"]), 1)  # type: ignore[arg-type]
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--root", str(self.repo), "move-archive", "--apply", "--date", "2030-01-15"]), 0)
+        self.assertIn("confirmed on the remote", out.getvalue())
+        # Dirty worktree files and index were not altered by the scratch-index snapshot
+        self.assertEqual(sh(self.repo, "git", "status", "--porcelain=v1", "--untracked-files=all"), before_status)
+        self.assertEqual(sh(self.repo, "git", "diff", "--cached"), "")
+        remote_refs = sh(self.repo, "git", "ls-remote", "origin", "refs/archive/2030-01-15/*")
+        self.assertIn("refs/archive/2030-01-15/heads/unlanded", remote_refs)
+        self.assertIn(branch_sha, remote_refs)
+        self.assertIn("refs/archive/2030-01-15/stash/0", remote_refs)
+        self.assertIn("refs/archive/2030-01-15/recovery/2030-01-15/worktrees/repo", remote_refs)

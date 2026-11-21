@@ -10,7 +10,7 @@ import signal
 import sqlite3
 import time
 
-from . import audits, compile_queue, gitops, harness as runner, prompt, queue, store, usage
+from . import audits, compile_queue, directives, gitops, harness as runner, prompt, queue, store, usage
 from .config import Config
 
 IDLE_SLEEP_S = 5.0
@@ -163,15 +163,20 @@ class Worker:
         """Heavy build commands the agent runs go through the compile queue, when one is configured."""
         return compile_queue.env(self.cfg, self.harness.env.get("PATH"))
 
+    def _agent_env(self, role: str, task_id: str) -> dict[str, str]:
+        return {**self._queue_env(), "WORKBOARD_WORKER": self.id, "WORKBOARD_HARNESS": self.harness.name,
+                "WORKBOARD_ROLE": role, "WORKBOARD_TASK": task_id}
+
     def _run_agent(self, claim: dict[str, object], worktree: Path, log: Path) -> int:
         task_id, token = str(claim["task_id"]), str(claim["token"])
-        prompt_file = self.cfg.handoff(task_id) / f"prompt-{claim['role']}.md"
+        role = str(claim["role"])
+        prompt_file = self.cfg.handoff(task_id) / f"prompt-{role}.md"
         prompt_file.write_text(prompt.render(self.cfg, claim, self.harness.name, worktree, self.conn), encoding="utf-8")
         return runner.run(
             self.harness, worktree, prompt_file, log,
             beat=lambda: queue.heartbeat(self.conn, self.cfg, task_id, token),
             beat_every_s=self.cfg.heartbeat_s, deadline=time.time() + int(claim["lease_min"]) * 60.0,  # type: ignore[arg-type]
-            should_stop=lambda: self.stop, extra_env=self._queue_env())
+            should_stop=lambda: self.stop, extra_env=self._agent_env(role, task_id))
 
     def author(self, claim: dict[str, object]) -> None:
         task_id, token, branch = str(claim["task_id"]), str(claim["token"]), str(claim["branch"])
@@ -179,8 +184,12 @@ class Worker:
         log = log_path(self.cfg, task_id, self.harness.name, "author")
         code = self._run_agent(claim, worktree, log)
         quota = code != 0 and runner.quota_hit(self.harness, log)
+        aborted = code == runner.STOPPED and directives.abort_directive(
+            self.conn, harness=self.harness.name, role="author", task_id=task_id)
         problem = ""
-        if code == runner.STOPPED:
+        if aborted:
+            problem = f"stopped by operator directive {aborted['directive_id']}: {aborted['message']}"
+        elif code == runner.STOPPED:
             problem = "the lease ended or the worker was stopped before the agent finished"
         elif code != 0:
             problem = f"the agent exited with status {code}" + (" after hitting its usage limit" if quota else "")
@@ -190,13 +199,16 @@ class Worker:
             problem = "the agent made no commits"
         elif gitops.has_merges(self.cfg, worktree):
             problem = "the branch contains a merge commit; history must be linear"
+        elif queue.is_rejected_sha(self.conn, task_id, gitops.head(worktree)):
+            problem = "the branch head is still the exact commit review already rejected"
         else:
             passed, why = gitops.run_guards(self.cfg, worktree, log, {"WORKBOARD_TASK": task_id, "WORKBOARD_BRANCH": branch})
             if not passed:
                 problem = why
         if problem:
             note_takeover(self.cfg, task_id, self.harness.name, "Attempt did not reach review", problem, worktree)
-            queue.finish_author(self.conn, self.cfg, task_id, token, ok=False, reason=problem.splitlines()[0], quota=quota)
+            queue.finish_author(self.conn, self.cfg, task_id, token, ok=False, reason=problem.splitlines()[0],
+                                quota=quota, aborted=bool(aborted))
             return
         status = queue.finish_author(self.conn, self.cfg, task_id, token, ok=True, candidate_sha=gitops.head(worktree))
         if status == "LANDING":
@@ -236,20 +248,24 @@ class Worker:
         result.unlink(missing_ok=True)
         log = log_path(self.cfg, job_id, self.harness.name, "audit")
         prompt_file = evidence / f"prompt-{self.harness.name}.md"
-        prompt_file.write_text(prompt.render_audit(self.cfg, job, self.harness.name), encoding="utf-8")
+        prompt_file.write_text(prompt.render_audit(self.cfg, job, self.harness.name, self.conn), encoding="utf-8")
         code = runner.run(
             self.harness, worktree, prompt_file, log,
             beat=lambda: audits.heartbeat(self.conn, self.cfg, job_id, token),
             beat_every_s=self.cfg.heartbeat_s, deadline=time.time() + int(job["lease_min"]) * 60.0,  # type: ignore[arg-type]
-            should_stop=lambda: self.stop, extra_env={**self._queue_env(), "WORKBOARD_ROOT": str(self.cfg.root)})
+            should_stop=lambda: self.stop, extra_env={**self._agent_env("audit", job_id), "WORKBOARD_ROOT": str(self.cfg.root)})
         quota = code != 0 and runner.quota_hit(self.harness, log)
+        aborted = code == runner.STOPPED and directives.abort_directive(
+            self.conn, harness=self.harness.name, role="audit", task_id=job_id)
         changed = restore_audit_checkout(worktree, str(job["sha"]), evidence)
         try:
             data = json.loads(result.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             data = None
         problem = ""
-        if code == runner.STOPPED:
+        if aborted:
+            problem = f"stopped by operator directive {aborted['directive_id']}: {aborted['message']}"
+        elif code == runner.STOPPED:
             problem = "the lease ended or the worker was stopped before the agent finished"
         elif code != 0:
             problem = f"the agent exited with status {code}" + (" after hitting its usage limit" if quota else "")
@@ -257,7 +273,7 @@ class Worker:
             problem = f"the agent changed the audit checkout; the change was saved to {changed} and undone"
         elif not isinstance(data, dict) or data.get("complete") is not True:
             problem = str((data or {}).get("reason") or (data or {}).get("summary") or "no complete result file")
-        audits.finish(self.conn, self.cfg, job_id, token, ok=not problem, reason=problem, quota=quota)
+        audits.finish(self.conn, self.cfg, job_id, token, ok=not problem, reason=problem, quota=quota, aborted=bool(aborted))
 
 
 def restore_audit_checkout(worktree: Path, sha: str, evidence: Path) -> str:

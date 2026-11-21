@@ -38,7 +38,7 @@ def queue_dir(state: Path) -> Path:
     return state / "compile"
 
 
-def env_for(state: Path, slots: int, tools: dict[str, dict[str, list[str]]], base_path: str | None = None) -> dict[str, str]:
+def env_for(state: Path, slots: int, tools: dict[str, dict[str, object]], base_path: str | None = None) -> dict[str, str]:
     """The environment that routes a process's heavy commands through the queue. Empty when the queue is off."""
     if slots <= 0 or not tools:
         return {}
@@ -53,7 +53,7 @@ def env(cfg, base_path: str | None = None) -> dict[str, str]:
     return env_for(cfg.state, cfg.compile_slots, cfg.compile_tools, base_path)
 
 
-def install_shims(state: Path, tools: dict[str, dict[str, list[str]]]) -> Path:
+def install_shims(state: Path, tools: dict[str, dict[str, object]]) -> Path:
     """Write one executable shim per configured tool. Rewritten each time, so a moved interpreter is picked up."""
     shims = queue_dir(state) / "shims"
     shims.mkdir(parents=True, exist_ok=True)
@@ -70,20 +70,20 @@ def install_shims(state: Path, tools: dict[str, dict[str, list[str]]]) -> Path:
     return shims
 
 
-def is_heavy(rule: dict[str, list[str]] | None, args: list[str]) -> bool:
+def is_heavy(rule: dict[str, object] | None, args: list[str]) -> bool:
     """Heavy when a configured flag appears, or when the first positional word is a configured subcommand.
 
     The values of `value_options` (for example `-C <dir>`) are skipped, so they are never taken for the subcommand.
     """
     if not rule:
         return False
-    flags = set(rule.get("flags", []))
+    flags = set(rule.get("flags", []))  # type: ignore[arg-type]
     if flags and any(a in flags for a in args):
         return True
-    subcommands = set(rule.get("subcommands", []))
+    subcommands = set(rule.get("subcommands", []))  # type: ignore[arg-type]
     if not subcommands:
         return False
-    value_options = set(rule.get("value_options", []))
+    value_options = set(rule.get("value_options", []))  # type: ignore[arg-type]
     skip = False
     for arg in args:
         if skip:
@@ -187,6 +187,177 @@ def view(state: Path, slots: int, now: float | None = None, alive=_alive) -> dic
 
 # ------------------------------------------------------------------ the shim
 
+SNAPSHOT_IDENTITY = {"GIT_AUTHOR_NAME": "workboard-compile", "GIT_AUTHOR_EMAIL": "compile@localhost",
+                     "GIT_COMMITTER_NAME": "workboard-compile", "GIT_COMMITTER_EMAIL": "compile@localhost"}
+
+
+def _caller_scope() -> tuple[str, str, str, str]:
+    return (os.environ.get("WORKBOARD_WORKER", ""), os.environ.get("WORKBOARD_HARNESS", ""),
+            os.environ.get("WORKBOARD_ROLE", "") or "interactive", os.environ.get("WORKBOARD_TASK", ""))
+
+
+def _check_directives(folder: Path, on_abort=None) -> int:
+    db = folder.parent / "workboard.db"
+    if not db.is_file():
+        return 0
+    import fnmatch
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='directives'").fetchone():
+                return 0
+            rows = conn.execute(
+                "SELECT * FROM directives WHERE active=1 AND (expires_at IS NULL OR expires_at>?) ORDER BY seq",
+                (time.time(),),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+    _, harness, role, task_id = _caller_scope()
+    seen = set(filter(None, os.environ.get("WORKBOARD_SEEN_DIRECTIVES", "").split(",")))
+    added: list[str] = []
+    for row in rows:
+        if row["scope_harness"] and row["scope_harness"] != harness:
+            continue
+        if row["scope_role"] and row["scope_role"] != role:
+            continue
+        if row["scope_task"] and (not task_id or not fnmatch.fnmatchcase(task_id, str(row["scope_task"]))):
+            continue
+        did = str(row["directive_id"])
+        if row["mode"] in ("wrap_up", "cancel_builds", "abort_leases"):
+            if on_abort is not None:
+                on_abort()
+            print(f"workboard directive [{did} {row['mode']}]: {row['message']}\n"
+                  "Do not start or retry builds while this directive is active; save your notes and wrap up.",
+                  file=sys.stderr, flush=True)
+            return 1
+        if row["mode"] == "instruction" and did not in seen:
+            print(f"[workboard notice {did}]: {row['message']}", file=sys.stderr, flush=True)
+            seen.add(did)
+            added.append(did)
+    if added:
+        os.environ["WORKBOARD_SEEN_DIRECTIVES"] = ",".join(sorted(seen))
+    return 0
+
+
+def _register_build(folder: Path, *, pid: int, pgid: int, slot: str, cmd: str) -> str:
+    db = folder.parent / "workboard.db"
+    if not db.is_file():
+        return ""
+    import sqlite3
+    import uuid
+    worker_id, harness, role, task_id = _caller_scope()
+    bid = f"compile-{pid}-{uuid.uuid4().hex[:8]}"
+    try:
+        conn = sqlite3.connect(str(db), timeout=2.0)
+        try:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='active_builds'").fetchone():
+                return ""
+            conn.execute(
+                "INSERT OR REPLACE INTO active_builds (build_id, pid, pgid, slot, worker, harness, role, task_id, "
+                "cwd, cmd, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (bid, pid, pgid, slot, worker_id, harness, role, task_id, os.getcwd(), cmd[:200], time.time()),
+            )
+            conn.commit()
+            return bid
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+
+
+def _unregister_build(folder: Path, build_id: str) -> None:
+    if not build_id:
+        return
+    db = folder.parent / "workboard.db"
+    if not db.is_file():
+        return
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db), timeout=2.0)
+        try:
+            conn.execute("DELETE FROM active_builds WHERE build_id=?", (build_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    import subprocess
+    res = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {res.stderr.strip()}")
+    return res.stdout.strip()
+
+
+def _checkout_root(start: Path) -> Path | None:
+    import subprocess
+    probe = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start, capture_output=True, text=True, check=False)
+    return Path(probe.stdout.strip()).resolve() if probe.returncode == 0 and probe.stdout.strip() else None
+
+
+def _preferred_slot(folder: Path, checkout: str) -> int:
+    try:
+        return int(json.loads((folder / "affinity.json").read_text(encoding="utf-8")).get(checkout, 0))
+    except Exception:
+        return 0
+
+
+def _remember_slot(folder: Path, checkout: str, slot: int) -> None:
+    try:
+        path = folder / "affinity.json"
+        table = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        table[checkout] = slot
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(table), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _enter_warm_slot(folder: Path, slot: int, checkout: Path, args: list[str]) -> list[str]:
+    """Snapshot the caller's working tree through a scratch index and check it out in slot N's fixed checkout."""
+    import tempfile
+    cwd = Path.cwd().resolve()
+    common = Path(_git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    place = folder / "worktrees" / f"slot-{slot}"
+    index = Path(_git(checkout, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+    with tempfile.TemporaryDirectory(prefix="wb-warm-index-") as tmp:
+        scratch = Path(tmp) / "index"
+        if index.exists():
+            shutil.copyfile(index, scratch)
+        git_env = {**os.environ, "GIT_INDEX_FILE": str(scratch)}
+        _git(checkout, "add", "-A", env=git_env)
+        tree = _git(checkout, "write-tree", env=git_env)
+    head = _git(checkout, "rev-parse", "HEAD")
+    commit = _git(checkout, "commit-tree", tree, "-p", head, "-m", "workboard warm compile snapshot",
+                  env={**os.environ, **SNAPSHOT_IDENTITY})
+    if not (place / ".git").exists():
+        place.parent.mkdir(parents=True, exist_ok=True)
+        _git(common.parent, "worktree", "add", "--detach", "--force", str(place), commit)
+    else:
+        _git(place, "checkout", "--force", "--detach", commit)
+        _git(place, "clean", "-fdq")
+    rel = cwd.relative_to(checkout)
+    os.chdir(place / rel)
+    os.environ["PWD"] = str(place / rel)
+    os.environ["WORKBOARD_WARM_DIR"] = str(place)
+
+    def remap(arg: str) -> str:
+        prefix, sep, value = arg.partition("=") if arg.startswith("--") and "=" in arg else ("", "", arg)
+        if not value.startswith("/"):
+            return arg
+        real = Path(os.path.realpath(value))
+        return prefix + sep + str(place / real.relative_to(checkout)) if real.is_relative_to(checkout) else arg
+
+    return [remap(a) for a in args]
+
+
 def _real_tool(name: str, shims: str) -> str:
     keep = [p for p in os.environ.get("PATH", "").split(os.pathsep)
             if p and (not shims or os.path.realpath(p) != os.path.realpath(shims))]
@@ -205,7 +376,7 @@ def _on_stop(callback) -> None:
         signal.signal(sig, handler)
 
 
-def _acquire(folder: Path, slots: int, ident: dict[str, object]):
+def _acquire(folder: Path, slots: int, ident: dict[str, object], prefer: int = 0):
     """Take one slot. Waiters line up on a queue lock first, so a newcomer never jumps a long wait."""
     folder.mkdir(parents=True, exist_ok=True)
     queued_at: float | None = None
@@ -221,30 +392,49 @@ def _acquire(folder: Path, slots: int, ident: dict[str, object]):
 
     line = open(folder / "queue.lock", "a+")
     try:
-        fcntl.flock(line.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        queued()
-        fcntl.flock(line.fileno(), fcntl.LOCK_EX)
-    handles = [open(folder / f"slot-{i}.lock", "a+") for i in range(1, slots + 1)]
-    try:
         while True:
-            for i, handle in enumerate(handles, 1):
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    continue
-                for other in handles:
-                    if other is not handle:
+            if _check_directives(folder, on_abort=(lambda: record(
+                folder, "abandoned", reason="directive", wait_s=round(time.time() - (queued_at or time.time()), 1), **ident
+            )) if queued_at is not None else None):
+                line.close()
+                sys.exit(1)
+            try:
+                fcntl.flock(line.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                queued()
+                time.sleep(POLL_S)
+        handles = [open(folder / f"slot-{i}.lock", "a+") for i in range(1, slots + 1)]
+        try:
+            while True:
+                if _check_directives(folder, on_abort=(lambda: record(
+                    folder, "abandoned", reason="directive", wait_s=round(time.time() - (queued_at or time.time()), 1), **ident
+                )) if queued_at is not None else None):
+                    for other in handles:
                         other.close()
-                return i, handle, queued_at
-            queued()
-            time.sleep(POLL_S)
+                    sys.exit(1)
+                for i, handle in sorted(enumerate(handles, 1), key=lambda pair: (pair[0] != prefer, pair[0])):
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    for other in handles:
+                        if other is not handle:
+                            other.close()
+                    return i, handle, queued_at
+                queued()
+                time.sleep(POLL_S)
+        except BaseException:
+            for other in handles:
+                other.close()
+            raise
     finally:
-        line.close()  # the next waiter in line may now look for a slot
+        if not line.closed:
+            line.close()  # the next waiter in line may now look for a slot
 
 
 def _watch_release(build_pid: int, slot: int, acquired_at: float, lock_fd: int, folder: Path,
-                   ident: dict[str, object]) -> None:
+                   ident: dict[str, object], build_id: str = "") -> None:
     """Fork a detached watcher that writes `released` when the build exits. It holds no lock and no pipe."""
     try:
         pid = os.fork()
@@ -276,6 +466,7 @@ def _watch_release(build_pid: int, slot: int, acquired_at: float, lock_fd: int, 
         else:
             while _alive(build_pid):
                 time.sleep(1.0)
+        _unregister_build(folder, build_id)
         record(folder, "released", slot=slot, hold_s=round(time.time() - acquired_at, 1), **ident)
     finally:
         os._exit(0)
@@ -290,16 +481,33 @@ def shim_main(argv: list[str]) -> None:
     except ValueError:
         tools, slots = {}, 0
     folder = Path(os.environ.get("WORKBOARD_COMPILE_DIR", ""))
-    if os.environ.get(HELD_ENV) or slots <= 0 or not str(folder) or not is_heavy(tools.get(tool), args):
+    rule = tools.get(tool)
+    if os.environ.get(HELD_ENV) or slots <= 0 or not str(folder) or not is_heavy(rule, args):
         os.execv(exe, [exe, *args])
-    ident = {"pid": os.getpid(), "cwd": os.getcwd(), "cmd": " ".join([tool, *args])[:200]}
-    slot, handle, queued_at = _acquire(folder, slots, ident)
+    if _check_directives(folder):
+        sys.exit(1)
+    warm_checkout = _checkout_root(Path.cwd()) if bool((rule or {}).get("warm")) and os.environ.get("WORKBOARD_WARM") != "0" else None
+    prefer = _preferred_slot(folder, str(warm_checkout)) if warm_checkout else 0
+    ident: dict[str, object] = {"pid": os.getpid(), "cwd": os.getcwd(), "cmd": " ".join([tool, *args])[:200]}
+    if warm_checkout:
+        ident["warm"] = True
+    slot, handle, queued_at = _acquire(folder, slots, ident, prefer=prefer)
     for sig in STOP_SIGNALS:
         signal.signal(sig, signal.SIG_DFL)  # from here on a stop belongs to the build
     acquired_at = time.time()
     record(folder, "acquired", slot=slot, slots=slots,
            wait_s=round(acquired_at - queued_at, 1) if queued_at else 0.0, **ident)
-    _watch_release(os.getpid(), slot, acquired_at, handle.fileno(), folder, ident)
+    if warm_checkout:
+        try:
+            args = _enter_warm_slot(folder, slot, warm_checkout, args)
+            _remember_slot(folder, str(warm_checkout), slot)
+        except Exception as exc:
+            record(folder, "warm_failed", slot=slot, error=str(exc)[:200], **ident)
+            sys.exit(f"workboard compile queue: could not prepare warm checkout slot {slot}: {exc}\n"
+                     "Set WORKBOARD_WARM=0 to build in the caller's checkout instead.")
+    own_pgid = os.getpid() if os.getpgrp() == os.getpid() else 0
+    bid = _register_build(folder, pid=os.getpid(), pgid=own_pgid, slot=str(slot), cmd=str(ident["cmd"]))
+    _watch_release(os.getpid(), slot, acquired_at, handle.fileno(), folder, ident, bid)
     os.environ[HELD_ENV] = str(slot)  # nested heavy commands run inside this slot
     os.set_inheritable(handle.fileno(), True)  # the lock lives exactly as long as the build process
     os.execv(exe, [exe, *args])

@@ -66,7 +66,7 @@ class Config:
     audit_regression_paths: list[str] = field(default_factory=lambda: list(DEFAULT_REGRESSION_PATHS))
     audit_trailer: str = "Fixes"
     compile_slots: int = 0           # 0: no compile queue
-    compile_tools: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    compile_tools: dict[str, dict[str, object]] = field(default_factory=dict)
     compile_alert_wait_min: float = 10.0
     compile_alert_free_pct: float = 30.0
     dashboard_host: str = "127.0.0.1"
@@ -113,23 +113,26 @@ def _slot(value: str) -> tuple[int, int]:
     return slot
 
 
-COMPILE_RULE_KEYS = ("subcommands", "flags", "value_options")
+COMPILE_LIST_KEYS = ("subcommands", "flags", "value_options")
+COMPILE_RULE_KEYS = (*COMPILE_LIST_KEYS, "warm")
 
 
-def _compile_tools(raw: object) -> dict[str, dict[str, list[str]]]:
+def _compile_tools(raw: object) -> dict[str, dict[str, object]]:
     """`[compile.tools.<tool>]` blocks: which invocations of each tool are heavy enough to queue."""
     if not isinstance(raw, dict):
         raise ConfigError("[compile] tools must be a table of [compile.tools.<tool>] blocks")
-    tools: dict[str, dict[str, list[str]]] = {}
+    tools: dict[str, dict[str, object]] = {}
     for name, rule in raw.items():
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", str(name)) or not isinstance(rule, dict):
             raise ConfigError(f"[compile.tools.{name}] must be a tool name with a table of rules")
         unknown = set(rule) - set(COMPILE_RULE_KEYS)
         if unknown:
             raise ConfigError(f"[compile.tools.{name}] has unknown key(s): {', '.join(sorted(unknown))}")
-        tools[str(name)] = {key: [str(v) for v in rule.get(key, [])] for key in COMPILE_RULE_KEYS}
-        if not tools[str(name)]["subcommands"] and not tools[str(name)]["flags"]:
+        entry: dict[str, object] = {key: [str(v) for v in rule.get(key, [])] for key in COMPILE_LIST_KEYS}
+        entry["warm"] = bool(rule.get("warm", False))
+        if not entry["subcommands"] and not entry["flags"]:
             raise ConfigError(f"[compile.tools.{name}] needs subcommands or flags, or nothing would be queued")
+        tools[str(name)] = entry
     return tools
 
 

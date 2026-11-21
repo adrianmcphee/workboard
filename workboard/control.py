@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from . import builds, queue, store
+from . import builds, directives, queue, store
 from .config import Config
 
 MAX_SLOTS = 16
@@ -89,6 +89,20 @@ def run(cfg: Config, conn: sqlite3.Connection, name: str, args: dict[str, object
                                 name == "signoff_accept", str(args.get("note") or ""))
             extra = f"; queued {entry['followup']}" if entry.get("followup") else ""
             return {"ok": True, "output": f"{args.get('task')} {entry['verdict']}{extra}"}
+        if name == "directive_set":
+            res = directives.set_directive(
+                conn, mode=str(args.get("mode") or ""), message=str(args.get("message") or ""),
+                harness=str(args.get("harness") or "") or None, role=str(args.get("role") or "") or None,
+                task_id=str(args.get("task") or "") or None,
+                ttl_min=float(args["ttl_min"]) if args.get("ttl_min") else None,  # type: ignore[arg-type]
+                kill_builds=bool(args.get("kill_builds")), valid_harnesses=set(cfg.harnesses), actor="human",
+            )
+            did = res["directive"]["directive_id"]  # type: ignore[index]
+            return {"ok": True, "output": f"set {did} ({len(res['signalled_builds'])} build(s) stopped)"}  # type: ignore[arg-type]
+        if name == "directive_clear":
+            ids = directives.clear(conn, directive_id=str(args.get("directive_id") or "") or None,
+                                   clear_all=bool(args.get("all")), actor="human")
+            return {"ok": True, "output": f"cleared {', '.join(ids) or 'nothing'}"}
         return {"ok": False, "output": f"unknown operation {name!r}"}
     except (KeyError, ValueError, TypeError) as exc:
         return {"ok": False, "output": f"{type(exc).__name__}: {exc}"[:400]}

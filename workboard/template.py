@@ -62,6 +62,7 @@ alert_free_pct = 30           # ...with at least this share of memory available
 # [compile.tools.cargo]
 # subcommands = ["build", "b", "test", "t", "check", "c", "clippy", "nextest", "run", "r", "bench", "rustc", "doc"]
 # value_options = ["-C", "--config", "-Z", "--color"]   # their values are never taken for the subcommand
+# warm = false                  # true: build in one fixed checkout per slot so incremental caches stay warm across worktrees
 #
 # [compile.tools.cmake]
 # flags = ["--build"]         # heavy whenever one of these flags appears

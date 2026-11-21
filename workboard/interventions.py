@@ -134,14 +134,32 @@ def audit_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
 
 
 def fleet_cards(conn: sqlite3.Connection) -> list[dict[str, object]]:
-    from . import queue
-    if not queue.draining(conn):
-        return []
-    marks = ",".join("?" * len(store.IN_FLIGHT))
-    flying = conn.execute(f"SELECT COUNT(*) FROM tasks WHERE status IN ({marks})", store.IN_FLIGHT).fetchone()[0]
-    return [card("HIGH", "draining", "The fleet is draining",
-                 f"No new authoring or audit jobs are handed out; {flying} task(s) are still in flight. "
-                 "Reviews and landing continue.", "workboard resume   (or, before moving machines: workboard move-check)")]
+    from . import directives, queue
+    cards: list[dict[str, object]] = []
+    if queue.draining(conn):
+        marks = ",".join("?" * len(store.IN_FLIGHT))
+        flying = conn.execute(f"SELECT COUNT(*) FROM tasks WHERE status IN ({marks})", store.IN_FLIGHT).fetchone()[0]
+        cards.append(card("HIGH", "draining", "The fleet is draining",
+                          f"No new authoring or audit jobs are handed out; {flying} task(s) are still in flight. "
+                          "Reviews and landing continue.", "workboard resume   (or, before moving machines: workboard move-check)"))
+    for row in directives.active(conn):
+        did, mode = str(row["directive_id"]), str(row["mode"])
+        sev = "CRITICAL" if mode in ("cancel_builds", "abort_leases") else (
+            "HIGH" if mode in ("pause_claims", "wrap_up") else "INFO"
+        )
+        rem = f" (expires in {round(int(row['remaining_s']) / 60)}m)" if row.get("remaining_s") is not None else ""
+        cards.append(card(sev, "directive", f"Directive {did} ({mode}) on {row['scope']}{rem}",
+                          str(row["message"]), f"workboard directive clear {did}",
+                          [op(f"Clear {did}", "directive_clear", f"Clear directive {did}?", directive_id=did)]))
+    last_landed = conn.execute("SELECT COALESCE(MAX(at), 0) FROM events WHERE kind='landed'").fetchone()[0]
+    fails = conn.execute("SELECT detail FROM events WHERE kind='land_failed' AND at>? ORDER BY id DESC LIMIT 6",
+                         (last_landed,)).fetchall()
+    if len(fails) >= 2 and len({r[0] for r in fails}) == 1:
+        cards.append(card("CRITICAL", "landing_blocked",
+                          f"Landing failed {len(fails)} times in a row for the same reason",
+                          f"Latest error: {fails[0][0]}. Nothing has landed since.",
+                          "Fix what the error names, then run: workboard land"))
+    return cards
 
 
 def compile_cards(cfg: Config, view: dict[str, object] | None) -> list[dict[str, object]]:

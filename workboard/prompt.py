@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 
-from . import train, usage
+from . import directives, train, usage
 from .config import Config
 
 
@@ -27,7 +27,8 @@ def takeover_path(cfg: Config, task_id: str) -> Path:
 
 
 def workboard_context(cfg: Config, conn: sqlite3.Connection | None, role: str, harness: str, lease_min: int,
-                      now: datetime | None = None, usage_snap: dict[str, object] | None = None) -> str:
+                      now: datetime | None = None, usage_snap: dict[str, object] | None = None,
+                      task_id: str | None = None) -> str:
     """The build this slice is going for and the subscription budget it spends. Empty when neither is known."""
     now = now or datetime.now()
     lines: list[str] = []
@@ -65,6 +66,10 @@ def workboard_context(cfg: Config, conn: sqlite3.Connection | None, role: str, h
                              if role == "author" else
                              "- This subscription is ahead of its pace. Keep to the diff and the code it calls; "
                              "review rigour is not what to save on.")
+    except Exception:
+        pass
+    try:
+        lines.extend(directives.prompt_lines(conn, harness=harness, role=role, task_id=task_id, now=now.timestamp()))
     except Exception:
         pass
     return ("\n## Workboard context\n" + "\n".join(lines) + "\n") if lines else ""
@@ -107,14 +112,15 @@ def render(cfg: Config, claim: dict[str, object], harness: str, worktree: Path,
 - Write your verdict as JSON to `{verdict_path(cfg, task_id)}`:
   `{{"passed": true, "summary": "..."}}` or `{{"passed": false, "defects": ["file:line what is wrong and why", "..."]}}`
 - Fail the branch for a real defect you can point to. Do not fail it for style you would have chosen differently."""]
-    parts.append(workboard_context(cfg, conn, role, harness, lease))
+    parts.append(workboard_context(cfg, conn, role, harness, lease, task_id=task_id))
     for rules in cfg.rules:
         if rules.is_file():
             parts += [f"## Project rules: `{rules.name}`", "", rules.read_text(encoding="utf-8").strip(), ""]
     return "\n".join(parts).rstrip() + "\n"
 
 
-def render_audit(cfg: Config, job: dict[str, object], harness: str) -> str:
+def render_audit(cfg: Config, job: dict[str, object], harness: str,
+                 conn: sqlite3.Connection | None = None) -> str:
     """The text an audit agent receives: its job, how to report, and the project rules."""
     from . import audits
     job_id, evidence = str(job["job_id"]), Path(str(job["evidence"]))
@@ -139,6 +145,12 @@ def render_audit(cfg: Config, job: dict[str, object], harness: str) -> str:
 - Duplicate or propose wont-fix: `{wb} audit triage --job {job_id} --duplicate F-0004 --note "of F-0001"`, `{wb} audit triage --job {job_id} --propose-wont-fix F-0005 --note "why"`""")
     parts.append(f"""- Finish by writing `{result}` as `{{"complete": true, "summary": "...", "checks": {{"<item>": "pass|fail|not-run"}}}}`.
   If you could not finish, write `"complete": false` with the reason; the job goes to another agent with your evidence.""")
+    try:
+        d_lines = directives.prompt_lines(conn, harness=harness, role="audit", task_id=job_id)
+        if d_lines:
+            parts += ["", "## Workboard context", *d_lines]
+    except Exception:
+        pass
     for rules in cfg.rules:
         if rules.is_file():
             parts += ["", f"## Project rules: `{rules.name}`", "", rules.read_text(encoding="utf-8").strip()]

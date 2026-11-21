@@ -32,6 +32,7 @@ Work out which of these applies, then read that section.
 | **Slot** | One worker process for a harness. `slots = 2` runs two agents of that harness at once. |
 | **Task / slice** | One outcome, defined by a Markdown file in `workboard/tasks/`. A slice is a task once it is on its way to a build. |
 | **Drain** | The fleet-wide pause (`workboard drain`): reviews and landing continue, no new authoring or audit job is handed out until `workboard resume`. |
+| **Directive** | A live operator instruction or control action (`workboard directive set`): scoped guidance, claim hold, wrap-up, build cancellation or lease abort. |
 | **Lease** | A time-limited claim on a task, kept alive by a heartbeat. A lost lease returns the task to the queue. |
 | **Takeover** | A task whose last attempt ended without a result. The next author continues in the same worktree with notes. |
 | **Compile queue** | Optional `[compile]` slots that heavy build commands (agents', guards', landings', builds') wait for, through PATH shims. |
@@ -142,7 +143,8 @@ workboard/            the package; the `workboard` command is workboard.cli:main
   builds.py           runs builds, writes manifests, records sign-off verdicts
   audits.py           audits of a build: audit jobs and their leases, findings, triage, fix reconciliation, reports
   interventions.py    the decisions shown to a person, with the command that takes each
-  movecheck.py        `workboard move-check`: what would be lost moving the project to another machine (read-only)
+  directives.py       scoped operator directives and tracked active compiles
+  movecheck.py        `workboard move-check` and `move-archive`: audit and archive local work before moving machines
   control.py          starts, resizes and stops workers; the closed list of dashboard operations
   dashboard.py        the local control-room page and its HTTP handler
 tests/                unittest suite: real git repositories and a fake agent CLI

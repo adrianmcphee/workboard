@@ -115,6 +115,42 @@ class Shim(unittest.TestCase):
         self.assertEqual([r["event"] for r in rows if r["pid"] == waiter.pid], ["queued", "abandoned"])
         self.assertEqual(compile_queue.view(self.state, 1)["waiters"], [])
 
+    def test_warm_tool_builds_in_a_fixed_slot_checkout_without_touching_caller_index_or_timestamps(self) -> None:
+        repo = self.state.parent / "warm-repo"
+        (repo / "src").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        (repo / "src" / "a.rs").write_text("base\n")
+        (repo / "src" / "keep.rs").write_text("unchanged\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"], cwd=repo, check=True)
+        bin_dir = self.state.parent / "warm-bin"
+        bin_dir.mkdir()
+        tool = bin_dir / "faketool"
+        tool.write_text('#!/bin/sh\necho "$PWD|$(cat a.rs)|$(cat extra.rs 2>/dev/null)|$*" >> "$LOG"\n')
+        tool.chmod(0o755)
+        warm_tools = {"faketool": {**CARGO, "warm": True}}
+        env = {**os.environ, **compile_queue.env_for(self.state, 1, warm_tools, f"{bin_dir}{os.pathsep}{os.environ['PATH']}"),
+               "LOG": str(self.log)}
+        env.pop(compile_queue.HELD_ENV, None)
+        (repo / "src" / "a.rs").write_text("edited\n")
+        (repo / "src" / "extra.rs").write_text("new\n")
+        subprocess.run(["faketool", "build", f"--config={repo / 'src' / 'a.rs'}"], cwd=repo / "src", env=env,
+                       check=True, stderr=subprocess.DEVNULL)
+        slot = (compile_queue.queue_dir(self.state) / "worktrees" / "slot-1").resolve()
+        pwd, a_txt, extra_txt, args = self.log.read_text().splitlines()[-1].split("|")
+        self.assertEqual(Path(pwd).resolve(), slot / "src")
+        self.assertEqual((a_txt, extra_txt), ("edited", "new"))
+        self.assertEqual(args, f"build --config={slot / 'src' / 'a.rs'}")
+        self.assertEqual(subprocess.run(["git", "diff", "--cached"], cwd=repo, capture_output=True, text=True).stdout, "")
+        kept_mtime = (slot / "src" / "keep.rs").stat().st_mtime_ns
+        time.sleep(1.1)
+        (repo / "src" / "a.rs").write_text("second\n")
+        (repo / "src" / "extra.rs").unlink()
+        subprocess.run(["faketool", "build"], cwd=repo / "src", env=env, check=True, stderr=subprocess.DEVNULL)
+        _, a_txt2, extra_txt2, _ = self.log.read_text().splitlines()[-1].split("|")
+        self.assertEqual((a_txt2, extra_txt2), ("second", ""))
+        self.assertEqual((slot / "src" / "keep.rs").stat().st_mtime_ns, kept_mtime)
+
 
 class Wiring(ProjectCase):
     guards = '"faketool build"'
